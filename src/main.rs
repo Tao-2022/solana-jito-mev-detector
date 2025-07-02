@@ -4,6 +4,7 @@ mod mev;
 use crate::client::SolanaClient;
 use crate::mev::MevDetector;
 use log::{error, info};
+use std::io::{self, Write};
 
 
 #[tokio::main]
@@ -21,7 +22,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = SolanaClient::new(rpc_url)?;
     let detector = MevDetector;
 
-    let target_signature = "5VaBES9bufGbjEYYCbaLLBamNiQ7LDKWyd46dMLqdujoaTkoX9eiqdRWGFzGeka2DuRk1THJhYNQgn1PNPWLNtnP";
+    info!(" 输入Solana交易哈希:");
+    print!("> ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let target_signature = input.trim();
+
+    if target_signature.is_empty() {
+        println!("[WARN] 未输入交易哈希，程序退出。");
+        return Ok(());
+    }
 
     info!("正在分析交易: {}", target_signature);
 

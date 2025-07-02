@@ -1,53 +1,48 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
 use tokio;
 use reqwest;
+use std::time::Duration;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 struct Transaction {
+    #[serde(default)]
     signature: String,
     slot: u64,
+    #[serde(rename = "blockTime")]
     block_time: Option<i64>,
     transaction: TransactionData,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 struct TransactionData {
     message: Message,
+    signatures: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 struct Message {
     #[serde(rename = "accountKeys")]
     account_keys: Vec<String>,
     instructions: Vec<Instruction>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 struct Instruction {
     #[serde(rename = "programId")]
-    program_id: String,
+    program_id: Option<String>,
     accounts: Vec<u8>,
     data: String,
 }
 
-#[derive(Debug)]
-struct AttackResult {
-    is_sandwich: bool,
-    is_frontrun: bool,
-    sandwich_details: Option<SandwichDetails>,
-    frontrun_details: Option<FrontrunDetails>,
-}
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct SandwichDetails {
     front_tx: String,
     back_tx: String,
     profit_estimate: f64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct FrontrunDetails {
     frontrun_tx: String,
     victim_tx: String,
@@ -60,11 +55,13 @@ struct SolanaClient {
 }
 
 impl SolanaClient {
-    fn new(rpc_url: String) -> Self {
-        Self {
+    fn new(rpc_url: String) -> Result<Self, reqwest::Error> {
+        Ok(Self {
             rpc_url,
-            client: reqwest::Client::new(),
-        }
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()?,
+        })
     }
 
     async fn get_transaction(&self, signature: &str) -> Result<Transaction, Box<dyn std::error::Error>> {
@@ -89,16 +86,14 @@ impl SolanaClient {
 
         let json: Value = response.json().await?;
         
-        if let Some(result) = json["result"].as_object() {
-            let transaction = Transaction {
-                signature: signature.to_string(),
-                slot: result["slot"].as_u64().unwrap_or(0),
-                block_time: result["blockTime"].as_i64(),
-                transaction: serde_json::from_value(result["transaction"].clone())?,
-            };
-            Ok(transaction)
+        if let Some(result) = json.get("result") {
+            let mut tx: Transaction = serde_json::from_value(result.clone())?;
+            if let Some(s) = tx.transaction.signatures.first() {
+                tx.signature = s.clone();
+            }
+            Ok(tx)
         } else {
-            Err("Transaction not found".into())
+            Err(format!("Transaction not found or error in response: {}", json).into())
         }
     }
 
@@ -125,13 +120,13 @@ impl SolanaClient {
 
         let json: Value = response.json().await?;
         
-        if let Some(result) = json["result"].as_object() {
-            if let Some(transactions) = result["transactions"].as_array() {
-                let signatures: Vec<String> = transactions
+        if let Some(result) = json.get("result") {
+             if let Some(signatures) = result.get("signatures").and_then(|s| s.as_array()) {
+                let sigs: Vec<String> = signatures
                     .iter()
-                    .filter_map(|tx| tx.as_str().map(|s| s.to_string()))
+                    .filter_map(|s| s.as_str().map(String::from))
                     .collect();
-                return Ok(signatures);
+                return Ok(sigs);
             }
         }
         
@@ -139,38 +134,59 @@ impl SolanaClient {
     }
 
     async fn get_surrounding_transactions(&self, target_signature: &str, target_slot: u64) -> Result<Vec<Transaction>, Box<dyn std::error::Error>> {
-        let mut all_transactions = Vec::new();
+        let mut all_transactions_to_analyze = Vec::new();
         
-        // 获取目标slot和前后几个slot的交易
-        for slot_offset in -2i64..=2i64 {
-            let slot = (target_slot as i64 + slot_offset) as u64;
-            if let Ok(signatures) = self.get_block_transactions(slot).await {
-                for sig in signatures {
-                    if let Ok(tx) = self.get_transaction(&sig).await {
-                        all_transactions.push(tx);
-                    }
+        let slot = target_slot;
+        println!("[DEBUG] 正在获取目标区块 {} 的所有交易签名...", slot);
+        let block_signatures = match self.get_block_transactions(slot).await {
+            Ok(sigs) => {
+                println!("[DEBUG] 区块 {} 获取到 {} 个签名。", slot, sigs.len());
+                sigs
+            },
+            Err(e) => {
+                println!("[WARN] 无法获取区块 {} 的交易签名: {}", slot, e);
+                return Ok(vec![]);
+            }
+        };
+
+        if let Some(target_index) = block_signatures.iter().position(|s| s == target_signature) {
+            println!("[DEBUG] 目标交易签名在区块中的索引为: {}", target_index);
+            let start_index = target_index.saturating_sub(5);
+            let end_index = std::cmp::min(target_index + 6, block_signatures.len());
+
+            println!("[DEBUG] 确定需要获取详细信息的交易签名范围: [{}, {})", start_index, end_index);
+
+            for i in start_index..end_index {
+                let sig = &block_signatures[i];
+                println!("[DEBUG] 正在获取选定交易详情: {}", sig);
+                if let Ok(tx) = self.get_transaction(sig).await {
+                    all_transactions_to_analyze.push(tx);
+                } else {
+                    println!("[WARN] 无法获取选定交易详情: {}", sig);
                 }
+            }
+        } else {
+            println!("[WARN] 未在区块 {} 的交易签名列表中找到目标交易签名。", slot);
+            // 如果目标交易不在当前区块签名列表中，则尝试获取目标交易本身
+            if let Ok(tx) = self.get_transaction(target_signature).await {
+                all_transactions_to_analyze.push(tx);
+                println!("[INFO] 仅获取了目标交易本身进行分析。");
+            } else {
+                println!("[ERROR] 无法获取目标交易本身。");
             }
         }
 
-        // 按时间排序
-        all_transactions.sort_by(|a, b| {
-            match (&a.block_time, &b.block_time) {
-                (Some(time_a), Some(time_b)) => time_a.cmp(time_b),
+        all_transactions_to_analyze.sort_by(|a, b| {
+            match (a.block_time, b.block_time) {
+                (Some(time_a), Some(time_b)) => time_a.cmp(&time_b),
                 (Some(_), None) => std::cmp::Ordering::Less,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
                 (None, None) => a.slot.cmp(&b.slot),
             }
         });
 
-        // 找到目标交易的位置并获取前后5笔交易
-        if let Some(target_index) = all_transactions.iter().position(|tx| tx.signature == target_signature) {
-            let start = target_index.saturating_sub(5);
-            let end = std::cmp::min(target_index + 6, all_transactions.len());
-            return Ok(all_transactions[start..end].to_vec());
-        }
-
-        Ok(all_transactions)
+        println!("[INFO] 最终将分析 {} 笔交易。", all_transactions_to_analyze.len());
+        Ok(all_transactions_to_analyze)
     }
 }
 
@@ -180,17 +196,13 @@ impl MevDetector {
     fn detect_sandwich_attack(&self, transactions: &[Transaction], target_signature: &str) -> Option<SandwichDetails> {
         let target_index = transactions.iter().position(|tx| tx.signature == target_signature)?;
         
-        // 寻找三明治攻击模式：相同账户在目标交易前后进行相反操作
         for i in 0..target_index {
             for j in (target_index + 1)..transactions.len() {
                 let front_tx = &transactions[i];
                 let back_tx = &transactions[j];
                 
-                // 检查是否为同一个攻击者
                 if self.is_same_attacker(&front_tx, &back_tx) {
-                    // 检查是否操作了相同的代币对
                     if self.targets_same_token_pair(&front_tx, &back_tx, &transactions[target_index]) {
-                        // 检查操作方向是否相反（买入-卖出或卖出-买入）
                         if self.has_opposite_operations(&front_tx, &back_tx) {
                             return Some(SandwichDetails {
                                 front_tx: front_tx.signature.clone(),
@@ -210,16 +222,13 @@ impl MevDetector {
         let target_index = transactions.iter().position(|tx| tx.signature == target_signature)?;
         let target_tx = &transactions[target_index];
         
-        // 检查目标交易前的交易
         for i in (0..target_index).rev() {
             let potential_frontrun = &transactions[i];
             
-            // 检查时间差（抢跑通常在很短时间内发生）
             if let (Some(frontrun_time), Some(target_time)) = (potential_frontrun.block_time, target_tx.block_time) {
                 let time_diff = target_time - frontrun_time;
                 
-                // 如果时间差很小且操作类似，可能是抢跑
-                if time_diff < 5000 && // 5秒内
+                if time_diff < 5000 && // 5 seconds
                    self.has_similar_operations(potential_frontrun, target_tx) &&
                    self.targets_same_token_pair_simple(potential_frontrun, target_tx) {
                     return Some(FrontrunDetails {
@@ -235,7 +244,6 @@ impl MevDetector {
     }
 
     fn is_same_attacker(&self, tx1: &Transaction, tx2: &Transaction) -> bool {
-        // 检查交易的第一个账户（通常是签名者）是否相同
         if let (Some(signer1), Some(signer2)) = (
             tx1.transaction.message.account_keys.first(),
             tx2.transaction.message.account_keys.first()
@@ -246,15 +254,13 @@ impl MevDetector {
     }
 
     fn targets_same_token_pair(&self, tx1: &Transaction, tx2: &Transaction, target_tx: &Transaction) -> bool {
-        // 简化版本：检查是否涉及相同的程序和账户
-        let tx1_programs: std::collections::HashSet<_> = tx1.transaction.message.instructions
-            .iter().map(|i| &i.program_id).collect();
-        let tx2_programs: std::collections::HashSet<_> = tx2.transaction.message.instructions
-            .iter().map(|i| &i.program_id).collect();
-        let target_programs: std::collections::HashSet<_> = target_tx.transaction.message.instructions
-            .iter().map(|i| &i.program_id).collect();
+        let tx1_programs: std::collections::HashSet<String> = tx1.transaction.message.instructions
+            .iter().filter_map(|i| i.program_id.clone()).collect();
+        let tx2_programs: std::collections::HashSet<String> = tx2.transaction.message.instructions
+            .iter().filter_map(|i| i.program_id.clone()).collect();
+        let target_programs: std::collections::HashSet<String> = target_tx.transaction.message.instructions
+            .iter().filter_map(|i| i.program_id.clone()).collect();
 
-        // 检查是否都涉及DEX程序（如Raydium, Orca等）
         let dex_programs = vec![
             "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8", // Raydium AMM
             "9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP", // Orca
@@ -262,7 +268,7 @@ impl MevDetector {
         ];
 
         for dex in &dex_programs {
-            if tx1_programs.contains(dex) && tx2_programs.contains(dex) && target_programs.contains(dex) {
+            if tx1_programs.contains(*dex) && tx2_programs.contains(*dex) && target_programs.contains(*dex) {
                 return true;
             }
         }
@@ -271,19 +277,15 @@ impl MevDetector {
     }
 
     fn targets_same_token_pair_simple(&self, tx1: &Transaction, tx2: &Transaction) -> bool {
-        // 简化版本的代币对检查
-        let tx1_programs: std::collections::HashSet<_> = tx1.transaction.message.instructions
-            .iter().map(|i| &i.program_id).collect();
-        let tx2_programs: std::collections::HashSet<_> = tx2.transaction.message.instructions
-            .iter().map(|i| &i.program_id).collect();
+        let tx1_programs: std::collections::HashSet<String> = tx1.transaction.message.instructions
+            .iter().filter_map(|i| i.program_id.clone()).collect();
+        let tx2_programs: std::collections::HashSet<String> = tx2.transaction.message.instructions
+            .iter().filter_map(|i| i.program_id.clone()).collect();
 
-        // 检查共同的DEX程序
         !tx1_programs.is_disjoint(&tx2_programs)
     }
 
     fn has_opposite_operations(&self, tx1: &Transaction, tx2: &Transaction) -> bool {
-        // 这里需要更复杂的逻辑来分析具体的交易指令
-        // 简化版本：假设不同的指令数据表示不同的操作
         if let (Some(inst1), Some(inst2)) = (
             tx1.transaction.message.instructions.first(),
             tx2.transaction.message.instructions.first()
@@ -294,71 +296,73 @@ impl MevDetector {
     }
 
     fn has_similar_operations(&self, tx1: &Transaction, tx2: &Transaction) -> bool {
-        // 检查是否有相似的操作（抢跑通常是相同类型的操作）
         if let (Some(inst1), Some(inst2)) = (
             tx1.transaction.message.instructions.first(),
             tx2.transaction.message.instructions.first()
         ) {
-            return inst1.program_id == inst2.program_id;
+            if let (Some(prog1), Some(prog2)) = (&inst1.program_id, &inst2.program_id) {
+                return prog1 == prog2;
+            }
         }
         false
     }
 
     fn estimate_sandwich_profit(&self, _front_tx: &Transaction, _back_tx: &Transaction) -> f64 {
-        // 简化版本：返回估算利润
-        // 实际实现需要分析代币余额变化
-        0.01 // 假设1%的利润
+        0.01
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Solana RPC端点
-    let rpc_url = "https://api.mainnet-beta.solana.com".to_string();
-    let client = SolanaClient::new(rpc_url);
+    let rpc_url = "https://mainnet.helius-rpc.com/?api-key=5e4bda23-d6c1-4e7e-9421-3bcab57692b0".to_string();
+    let client = SolanaClient::new(rpc_url)?;
     let detector = MevDetector;
 
-    // 示例：检测指定交易哈希
-    println!("请输入要检测的Solana交易哈希:");
+    println!("[INFO] 步骤1: 等待输入Solana交易哈希...");
     let mut input = String::new();
     std::io::stdin().read_line(&mut input)?;
     let target_signature = input.trim();
 
-    println!("正在分析交易: {}", target_signature);
+    if target_signature.is_empty() {
+        println!("[WARN] 未输入交易哈希，程序退出。");
+        return Ok(());
+    }
 
-    // 获取目标交易信息
+    println!("[INFO] 步骤2: 正在分析交易: {}", target_signature);
+
     match client.get_transaction(target_signature).await {
         Ok(target_tx) => {
-            println!("交易所在区块: {}", target_tx.slot);
+            println!("[INFO] 步骤3: 成功获取目标交易信息。交易所在区块: {}", target_tx.slot);
             
-            // 获取周围的交易
+            println!("[INFO] 步骤4: 正在获取周边交易...");
             match client.get_surrounding_transactions(target_signature, target_tx.slot).await {
                 Ok(surrounding_txs) => {
-                    println!("获取到 {} 笔相关交易", surrounding_txs.len());
+                    println!("[INFO] 步骤5: 成功获取到 {} 笔相关交易进行分析", surrounding_txs.len());
                     
-                    // 检测三明治攻击
+                    println!("[INFO] 步骤6: 正在检测三明治攻击...");
                     if let Some(sandwich) = detector.detect_sandwich_attack(&surrounding_txs, target_signature) {
-                        println!("🚨 检测到三明治攻击!");
-                        println!("  前置交易: {}", sandwich.front_tx);
-                        println!("  后置交易: {}", sandwich.back_tx);
+                        println!("[ALERT] 🚨 检测到三明治攻击!");
+                        println!("  前置交易: https://solscan.io/tx/{}", sandwich.front_tx);
+                        println!("  后置交易: https://solscan.io/tx/{}", sandwich.back_tx);
                         println!("  估算利润: {:.2}%", sandwich.profit_estimate * 100.0);
                     } else {
-                        println!("✅ 未检测到三明治攻击");
+                        println!("[INFO] ✅ 未检测到三明治攻击");
                     }
                     
-                    // 检测抢跑攻击
+                    println!("[INFO] 步骤7: 正在检测抢跑攻击...");
                     if let Some(frontrun) = detector.detect_frontrun_attack(&surrounding_txs, target_signature) {
-                        println!("🚨 检测到抢跑攻击!");
-                        println!("  抢跑交易: {}", frontrun.frontrun_tx);
+                        println!("[ALERT] 🚨 检测到抢跑攻击!");
+                        println!("  抢跑交易: https://solscan.io/tx/{}", frontrun.frontrun_tx);
+                        println!("  受害交易: https://solscan.io/tx/{}", frontrun.victim_tx);
                         println!("  时间差: {} 毫秒", frontrun.time_difference_ms);
                     } else {
-                        println!("✅ 未检测到抢跑攻击");
+                        println!("[INFO] ✅ 未检测到抢跑攻击");
                     }
                 }
-                Err(e) => println!("获取周围交易失败: {}", e),
+                Err(e) => println!("[ERROR] 获取周围交易失败: {}", e),
             }
         }
-        Err(e) => println!("获取交易失败: {}", e),
+        Err(e) => println!("[ERROR] 获取交易失败: {}", e),
     }
 
     Ok(())

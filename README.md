@@ -1,57 +1,81 @@
-# Solana MEV Detector (Simple)
+# Solana MEV 攻击检测器
 
-这是一个简单的命令行工具，用于检测Solana区块链上的MEV（最大可提取价值）攻击，特别是三明治攻击和抢跑攻击。
+一个轻量级的 Solana 链上交易分析工具，用于检测 **三明治攻击（Sandwich Attack）** 和 **抢跑攻击（Frontrun Attack）** 等最大可提取价值（MEV）行为。
 
-## 功能
+## 功能特点
 
-- **交易分析**: 通过Solana RPC，获取指定交易及其周围的交易信息。
-- **三明治攻击检测**: 分析交易序列，识别潜在的三明治攻击模式。
-- **抢跑攻击检测**: 识别在目标交易之前执行的、具有相似特征的抢跑交易。
-- **可扩展**: 代码结构清晰，易于扩展以支持更复杂的MEV攻击检测逻辑。
+* 通过 Solana RPC 获取指定交易信息
+* 自动抓取目标交易所在区块的周边交易
+* 基于 DEX 合约地址和交易结构检测三明治攻击
+* 基于时间差和程序相似度检测抢跑攻击
 
-## 如何构建和运行
+## 项目结构
 
-### 1. 环境准备
-
-确保你已经安装了 [Rust](https://www.rust-lang.org/tools/install)。
-
-### 2. 克隆并构建项目
-
-```bash
-git clone https://github.com/your-username/solana-mev-detector-simple.git
-cd solana-mev-detector-simple
-cargo build --release
+```
+src/
+├── main.rs        # 主程序入口，交互逻辑
+├── client.rs      # SolanaClient 实现：RPC 请求与交易解析
+└── mev.rs         # MevDetector 实现：MEV 检测逻辑
 ```
 
-### 3. 运行检测器
+## 运行要求
 
-构建完成后，你可以运行检测器并输入一个Solana交易哈希进行分析。
+* Rust 环境（推荐 2021 edition）
+* Solana 主网 RPC（推荐使用 [Helius](https://www.helius.xyz/) 提供的服务）
 
-```bash
-./target/release/solana-mev-detector-simple
+### Cargo 依赖（在 `Cargo.toml` 中添加）
+
+```toml
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.11", features = ["json", "gzip", "rustls-tls"] }
+tokio = { version = "1", features = ["full"] }
 ```
 
-程序会提示你输入一个交易哈希。例如，你可以输入一个已知的抢跑或三明治攻击的交易哈希来测试。
+## 使用方法
 
-## 工作原理
+1. 克隆本仓库：
 
-1.  **输入交易哈希**: 程序接收一个用户输入的Solana交易哈希。
-2.  **获取交易信息**: 使用Solana的`getTransaction` RPC方法，获取目标交易的详细信息，包括其所在的区块（slot）。
-3.  **获取周围交易**: 获取目标交易所在区块及其前后几个区块的所有交易签名，然后获取这些交易的详细信息。
-4.  **排序和分析**: 将获取到的交易按时间戳排序，然后分析目标交易前后的交易序列。
-5.  **攻击检测**:
-    - **三明治攻击**: 检测是否存在一个攻击者在目标交易前后分别执行了相反的操作（例如，买入和卖出同一代币）。
-    - **抢跑攻击**: 检测在目标交易之前极短时间内，是否存在由同一程序执行的类似交易。
-6.  **输出结果**: 在控制台输出检测结果，如果检测到攻击，会显示相关交易的链接。
+   ```bash
+   git clone https://github.com/your-username/solana-mev-detector.git
+   cd solana-mev-detector
+   ```
+2. 修改 `main.rs` 中的 RPC 地址：
 
-## 未来改进
+   ```rust
+   let rpc_url = "https://mainnet.helius-rpc.com/?api-key=你的API密钥".to_string();
+   ```
+3. 编译运行：
 
-- **更精确的攻击检测逻辑**: 目前的检测逻辑非常简化。可以引入更复杂的分析，例如解析交易指令数据（`data`字段）来更准确地识别操作类型和目标资产。
-- **支持更多DEX**: 扩展支持的DEX列表，以覆盖更广泛的交易场景。
-- **性能优化**: 通过异步和并发处理，优化从RPC获取大量交易数据的性能。
-- **配置化**: 将RPC端点、检测参数（如时间窗口）等配置化。
-- **实时监控**: 增加一个模式，用于实时监控新的区块，并自动分析其中的MEV机会。
+   ```bash
+   cargo run --release
+   ```
+4. 根据提示输入目标交易哈希：
 
-## 免责声明
+   ```text
+   [INFO] 步骤1: 输入Solana交易哈希:
+   > 请输入目标交易哈希
+   ```
 
-此工具仅用于学习和研究目的，不构成任何投资建议。MEV检测是一个复杂的问题，此工具的检测结果可能不完全准确。
+## 示例输出
+
+```text
+[INFO] 获取目标交易信息成功，所在区块: 215890000
+[INFO] 获取 11 笔相关交易，开始分析...
+[ALERT] 🚨 检测到三明治攻击:
+  前置交易: https://solscan.io/tx/...
+  后置交易: https://solscan.io/tx/...
+  估算利润: 1.00%
+[ALERT] 🚨 检测到抢跑攻击:
+  抢跑交易: https://solscan.io/tx/...
+  受害交易: https://solscan.io/tx/...
+  时间差: 2000 毫秒
+```
+
+## 注意事项
+
+* 当前利润估算为固定值（0.01），实际可结合 Swap Token 金额和 Pool 状态估算精度
+* 检测逻辑以 DEX Program ID 识别为主（支持 Raydium、Orca、Serum）
+
+

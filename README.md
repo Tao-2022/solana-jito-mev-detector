@@ -38,7 +38,7 @@ tokio = { version = "1", features = ["full"] }
 1. 克隆本仓库：
 
    ```bash
-   git clone https://github.com/your-username/solana-mev-detector.git
+   git clone git@github.com:Tao-2022/solana-mev-detector-simple.git
    cd solana-mev-detector
    ```
 2. 修改 `main.rs` 中的 RPC 地址：

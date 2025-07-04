@@ -12,7 +12,6 @@ pub struct SandwichDetails {
 pub struct FrontrunDetails {
     pub frontrun_tx: String,
     pub victim_tx: String,
-    pub time_difference_ms: i64,
 }
 
 impl MevDetector {
@@ -62,16 +61,17 @@ impl MevDetector {
 
         for i in (0..target_index).rev() {
             let potential = &transactions[i];
-            if let (Some(ft), Some(tt)) = (potential.block_time, target_tx.block_time) {
-                let diff = tt - ft;
-                if diff < 5 && self.has_similar_operations(potential, target_tx)
-                    && self.targets_same_token_pair_simple(potential, target_tx) {
-                    return Some(FrontrunDetails {
-                        frontrun_tx: potential.signature.clone(),
-                        victim_tx: target_tx.signature.clone(),
-                        time_difference_ms: diff * 1000,
-                    });
-                }
+
+            // 主要的抢跑检测逻辑：攻击者和受害者的交易在同一个区块（slot）中。
+            // 由于交易列表是按区块中的顺序排列的，任何在目标交易之前的交易都是潜在的抢跑。
+            if potential.slot == target_tx.slot
+                && self.has_similar_operations(potential, target_tx)
+                && self.targets_same_token_pair_simple(potential, target_tx)
+            {
+                return Some(FrontrunDetails {
+                    frontrun_tx: potential.signature.clone(),
+                    victim_tx: target_tx.signature.clone(),
+                });
             }
         }
 

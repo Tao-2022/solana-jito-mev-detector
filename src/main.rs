@@ -65,7 +65,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         error!("🚨 检测到抢跑攻击:");
                         info!("  抢跑交易: https://solscan.io/tx/{}", frontrun.frontrun_tx);
                         info!("  受害交易: https://solscan.io/tx/{}", frontrun.victim_tx);
-                        info!("  时间差: {} 毫秒", frontrun.time_difference_ms);
                     } else {
                         info!("✅ 未检测到抢跑攻击");
                     }

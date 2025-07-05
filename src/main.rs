@@ -63,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         detector.detect_frontrun_attack(&surrounding_txs, target_signature)
                     {
                         error!("🚨 检测到抢跑攻击:");
-                        info!("  抢跑交易: https://solscan.io/tx/{}", frontrun.frontrun_tx);
+                        info!("  抢跑交易: https://solscan.io/tx/{}", frontrun.front_tx);
                         info!("  受害交易: https://solscan.io/tx/{}", frontrun.victim_tx);
                     } else {
                         info!("✅ 未检测到抢跑攻击");

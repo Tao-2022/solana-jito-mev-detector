@@ -10,7 +10,7 @@ pub struct SandwichDetails {
 }
 
 pub struct FrontrunDetails {
-    pub frontrun_tx: String,
+    pub front_tx: String,
     pub victim_tx: String,
 }
 
@@ -69,7 +69,7 @@ impl MevDetector {
                 && self.targets_same_token_pair_simple(potential, target_tx)
             {
                 return Some(FrontrunDetails {
-                    frontrun_tx: potential.signature.clone(),
+                    front_tx: potential.signature.clone(),
                     victim_tx: target_tx.signature.clone(),
                 });
             }
@@ -79,58 +79,58 @@ impl MevDetector {
     }
 
     /// 判断两笔交易是否由同一个攻击者发起。
-    ///
-    /// # 参数
-    /// - `tx1`: 第一笔交易。
-    /// - `tx2`: 第二笔交易。
-    ///
-    /// # 返回
-    /// 如果是同一个攻击者，返回`true`，否则返回`false`。
     fn is_same_attacker(&self, tx1: &Transaction, tx2: &Transaction) -> bool {
         tx1.transaction.message.account_keys.first() == tx2.transaction.message.account_keys.first()
     }
 
-    /// 判断两笔交易是否针对相同的代币对进行操作。
-    ///
-    /// # 参数
-    /// - `tx1`: 第一笔交易。
-    /// - `tx2`: 第二笔交易。
-    /// - `target`: 目标交易。
-    ///
-    /// # 返回
-    /// 如果针对相同的代币对，返回`true`，否则返回`false`。
+    /// 通过分析共享的DEX程序和账户，判断三笔交易是否针对相同的代币对。
+    /// 这是检测三明治攻击的核心逻辑。
     fn targets_same_token_pair(&self, tx1: &Transaction, tx2: &Transaction, target: &Transaction) -> bool {
-        let get_program_ids = |tx: &Transaction| -> HashSet<String> {
-            tx.transaction.message.instructions.iter()
-                .filter_map(|i| i.program_id.clone())
-                .collect()
+        const MIN_SHARED_ACCOUNTS: usize = 2; // 至少需要共享的账户数量（例如一个代币对的两个账户）
+
+        let get_instruction_accounts = |tx: &Transaction| -> (HashSet<String>, HashSet<String>) {
+            let mut programs = HashSet::new();
+            let mut accounts = HashSet::new();
+            for instruction in &tx.transaction.message.instructions {
+                if let Some(prog_id) = &instruction.program_id {
+                    programs.insert(prog_id.clone());
+                }
+                // instruction.accounts 是账户索引，我们需要从顶层 account_keys 获取实际地址
+                for &acc_index in &instruction.accounts {
+                    if let Some(key) = tx.transaction.message.account_keys.get(acc_index as usize) {
+                        accounts.insert(key.clone());
+                    }
+                }
+            }
+            (programs, accounts)
         };
 
-        let tx1_programs = get_program_ids(tx1);
-        let tx2_programs = get_program_ids(tx2);
-        let target_programs = get_program_ids(target);
+        let (tx1_programs, tx1_accounts) = get_instruction_accounts(tx1);
+        let (tx2_programs, tx2_accounts) = get_instruction_accounts(tx2);
+        let (target_programs, target_accounts) = get_instruction_accounts(target);
 
-        const DEX_PROGRAMS: [&str; 3] = [
-            "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8", // Raydium
-            "9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP", // Orca
-            "22Y43yTVxuUkoRKdm9thyRhQ3SdgQS7c7kB6UNCiaczD", // Serum
-        ];
+        // 1. 检查是否存在一个共同的DEX程序
+        let common_programs: Vec<_> = tx1_programs
+            .intersection(&target_programs)
+            .cloned()
+            .collect();
+        if common_programs.is_empty() || !tx2_programs.contains(common_programs[0].as_str()) {
+            return false;
+        }
 
-        DEX_PROGRAMS.iter().any(|dex| {
-            tx1_programs.contains(*dex)
-                && tx2_programs.contains(*dex)
-                && target_programs.contains(*dex)
-        })
+        // 2. 检查是否共享了足够多的账户（这是更强的信号）
+        let common_accounts_target_tx1: HashSet<_> = target_accounts.intersection(&tx1_accounts).collect();
+        let common_accounts_target_tx2: HashSet<_> = target_accounts.intersection(&tx2_accounts).collect();
+
+        // 攻击者的两笔交易也必须共享这些从受害者那里来的账户
+        let final_common_accounts: HashSet<_> = common_accounts_target_tx1
+            .intersection(&common_accounts_target_tx2)
+            .collect();
+
+        final_common_accounts.len() >= MIN_SHARED_ACCOUNTS
     }
 
     /// 简单判断两笔交易是否针对相同的代币对进行操作。
-    ///
-    /// # 参数
-    /// - `tx1`: 第一笔交易。
-    /// - `tx2`: 第二笔交易。
-    ///
-    /// # 返回
-    /// 如果有共同的程序ID，返回`true`，否则返回`false`。
     fn targets_same_token_pair_simple(&self, tx1: &Transaction, tx2: &Transaction) -> bool {
         let tx1_programs: HashSet<String> = tx1.transaction.message.instructions.iter()
             .filter_map(|i| i.program_id.clone()).collect();
@@ -140,26 +140,12 @@ impl MevDetector {
     }
 
     /// 判断两笔交易是否具有相反的操作（例如，一笔买入，一笔卖出）。
-    ///
-    /// # 参数
-    /// - `tx1`: 第一笔交易。
-    /// - `tx2`: 第二笔交易。
-    ///
-    /// # 返回
-    /// 如果操作相反，返回`true`，否则返回`false`。
     fn has_opposite_operations(&self, tx1: &Transaction, tx2: &Transaction) -> bool {
         tx1.transaction.message.instructions.first().map(|i| &i.data)
             != tx2.transaction.message.instructions.first().map(|i| &i.data)
     }
 
     /// 判断两笔交易是否具有相似的操作（例如，相同的程序ID）。
-    ///
-    /// # 参数
-    /// - `tx1`: 第一笔交易。
-    /// - `tx2`: 第二笔交易。
-    ///
-    /// # 返回
-    /// 如果操作相似，返回`true`，否则返回`false`。
     fn has_similar_operations(&self, tx1: &Transaction, tx2: &Transaction) -> bool {
         match (
             tx1.transaction.message.instructions.first(),
@@ -171,13 +157,6 @@ impl MevDetector {
     }
 
     /// 估算三明治攻击的利润。
-    ///
-    /// # 参数
-    /// - `_front`: 前置交易。
-    /// - `_back`: 后置交易。
-    ///
-    /// # 返回
-    /// 估算的利润百分比。
     fn estimate_sandwich_profit(&self, _front: &Transaction, _back: &Transaction) -> f64 {
         0.01 // Placeholder
     }

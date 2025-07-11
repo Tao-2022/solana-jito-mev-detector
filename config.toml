@@ -1,0 +1,7 @@
+# config.toml
+
+# Solana RPC URL
+rpc_url = "https://api.mainnet-beta.solana.com"
+
+# Default log level (e.g., "info", "warn", "error")
+log_level = "info"

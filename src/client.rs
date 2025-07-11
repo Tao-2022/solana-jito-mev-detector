@@ -3,7 +3,6 @@ use serde_json::Value;
 use std::time::Duration;
 use reqwest::Client;
 
-
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Transaction {
     #[serde(default)]
@@ -92,14 +91,14 @@ impl SolanaClient {
         }
     }
 
-    /// 获取指定区块号的所有交易签名。
+    /// 获取指定区块的完整信息，包含所有交易详情。
     ///
     /// # 参数
     /// - `slot`: 区块号。
     ///
     /// # 返回
-    /// `Result`，包含交易签名字符串向量或错误信息。
-    pub async fn get_block_transactions(&self, slot: u64) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    /// `Result`，包含该区块所有交易的`Transaction`结构体向量或错误信息。
+    pub async fn get_full_block(&self, slot: u64) -> Result<Vec<Transaction>, Box<dyn std::error::Error>> {
         let request_body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -108,7 +107,7 @@ impl SolanaClient {
                 slot,
                 {
                     "encoding": "json",
-                    "transactionDetails": "signatures",
+                    "transactionDetails": "full",
                     "maxSupportedTransactionVersion": 0
                 }
             ]
@@ -118,50 +117,30 @@ impl SolanaClient {
         let json: Value = response.json().await?;
 
         if let Some(result) = json.get("result") {
-            if let Some(signatures) = result.get("signatures").and_then(|s| s.as_array()) {
-                return Ok(signatures.iter().filter_map(|s| s.as_str().map(String::from)).collect());
-            }
-        }
-
-        Ok(vec![])
-    }
-
-    /// 获取目标交易周围的相关交易。
-    ///
-    /// # 参数
-    /// - `target_signature`: 目标交易的签名。
-    /// - `target_slot`: 目标交易所在的区块号。
-    ///
-    /// # 返回
-    /// `Result`，包含相关交易的`Transaction`结构体向量或错误信息。
-    pub async fn get_surrounding_transactions(&self, target_signature: &str, target_slot: u64) -> Result<Vec<Transaction>, Box<dyn std::error::Error>> {
-        let mut all_transactions = Vec::new();
-        let block_signatures = self.get_block_transactions(target_slot).await?;
-
-        if let Some(target_index) = block_signatures.iter().position(|s| s == target_signature) {
-            let start = target_index.saturating_sub(5);
-            let end = (target_index + 6).min(block_signatures.len());
-
-            for sig in &block_signatures[start..end] {
-                if let Ok(tx) = self.get_transaction(sig).await {
-                    all_transactions.push(tx);
+            let block_time: Option<i64> = result.get("blockTime").and_then(|v| v.as_i64());
+            
+            if let Some(txs_json) = result.get("transactions") {
+                let mut transactions = Vec::new();
+                if let Some(txs_array) = txs_json.as_array() {
+                    for tx_json in txs_array {
+                        if let Some(tx_data_json) = tx_json.get("transaction") {
+                            if let Ok(tx_data) = serde_json::from_value::<TransactionData>(tx_data_json.clone()) {
+                                let signature = tx_data.signatures.first().cloned().unwrap_or_default();
+                                let tx = Transaction {
+                                    signature,
+                                    slot,
+                                    block_time,
+                                    transaction: tx_data,
+                                };
+                                transactions.push(tx);
+                            }
+                        }
+                    }
                 }
-            }
-        } else {
-            if let Ok(tx) = self.get_transaction(target_signature).await {
-                all_transactions.push(tx);
+                return Ok(transactions);
             }
         }
 
-        all_transactions.sort_by(|a, b| {
-            match (a.block_time, b.block_time) {
-                (Some(ta), Some(tb)) => ta.cmp(&tb),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => a.slot.cmp(&b.slot),
-            }
-        });
-
-        Ok(all_transactions)
+        Err(format!("Failed to parse full block or block not found: {}", json).into())
     }
 }

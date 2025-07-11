@@ -133,12 +133,6 @@ async fn analyze_transaction(client: &SolanaClient, detector: &MevDetector, targ
             // 步骤 4: 构建Jito捆绑包
             let jito_bundle = detector.build_jito_bundle(&nearby_transactions, tip_index, tip_account, tip_amount);
 
-            // 检查目标交易是否在捆绑包中
-            if !jito_bundle.bundle_transactions.iter().any(|tx| tx.signature == target_signature) {
-                info!("✅ 找到一个Jito捆绑包，但您的交易不在其中。初步判断没有被MEV。");
-                return Ok(());
-            }
-
             error!("🚨 检测到Jito捆绑包! Jito捆绑包最多包含5笔交易，您的交易是其中之一。");
             info!("  -> 小费交易: https://solscan.io/tx/{}", jito_bundle.tip_tx_signature);
             info!("  -> 小费地址: {}", jito_bundle.tip_account);

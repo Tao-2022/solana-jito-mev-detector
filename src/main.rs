@@ -171,7 +171,7 @@ async fn analyze_transaction(client: &SolanaClient, detector: &MevDetector, targ
             info!("✅ 在前4笔和后4笔非投票交易中未发现Jito小费地址。");
             info!("💡 这可能意味着:");
             info!("   1. 确实没有被MEV攻击");
-            info!("   2. MEV攻击不是通过Jito进行的");
+            info!("   2. MEV攻击不是通过Jito捆绑包进行的");
         }
     }
 

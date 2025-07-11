@@ -1,6 +1,4 @@
-use crossterm::event::{self, Event, KeyCode};
-use crossterm::{terminal, execute};
-use std::io::{stdout, Write};
+use std::io::{self, Write};
 use config::Config;
 use serde::Deserialize;
 
@@ -30,149 +28,151 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     info!("Solana MEV 检测器启动...");
+    println!("{}", "=".repeat(60));
+    println!("🔍 Solana MEV 检测器 v0.2.0");
+    println!("{}", "=".repeat(60));
 
     let client = SolanaClient::new(settings.rpc_url)?;
     let detector = MevDetector;
 
-    terminal::enable_raw_mode()?;
-    let mut stdout = stdout();
-
     loop {
-        let mut target_signature = String::new();
-        
-        // 用户输入界面
-        loop {
-            execute!(stdout, terminal::Clear(terminal::ClearType::All))?;
-            print!("请输入Solana交易哈希 (按 ESC 键退出):\n> {}", target_signature);
-            stdout.flush()?;
+        println!("\n请输入Solana交易哈希 (输入 'exit' 或 'quit' 退出):");
+        print!("> ");
+        io::stdout().flush()?;
 
-            if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Char(c) => {
-                        target_signature.push(c);
+        let mut input = String::new();
+        match io::stdin().read_line(&mut input) {
+            Ok(_) => {
+                let target_signature = input.trim();
+                
+                // 检查退出命令
+                if target_signature.is_empty() {
+                    continue;
+                }
+                
+                if target_signature.eq_ignore_ascii_case("exit") || 
+                   target_signature.eq_ignore_ascii_case("quit") {
+                    println!("\n👋 程序退出，感谢使用！");
+                    break;
+                }
+
+                println!("\n🔄 正在分析交易: {}", target_signature);
+                println!("{}", "-".repeat(50));
+
+                // 分析交易
+                match analyze_transaction(&client, &detector, target_signature).await {
+                    Ok(_) => {
+                        println!("{}", "-".repeat(50));
+                        println!("✅ 分析完成！");
                     }
-                    KeyCode::Backspace => {
-                        target_signature.pop();
+                    Err(e) => {
+                        println!("{}", "-".repeat(50));
+                        error!("❌ 分析失败: {}", e);
                     }
-                    KeyCode::Enter => {
-                        break;
-                    }
-                    KeyCode::Esc => {
-                        terminal::disable_raw_mode()?;
-                        println!("\n程序退出。");
-                        return Ok(());
-                    }
-                    _ => {}
                 }
             }
-        }
-
-        terminal::disable_raw_mode()?;
-        let target_signature = target_signature.trim();
-
-        if target_signature.is_empty() {
-            println!("[WARN] 未输入交易哈希，请重新输入。");
-            terminal::enable_raw_mode()?;
-            continue;
-        }
-
-        println!("\n正在分析交易: {}", target_signature);
-
-        // 分析交易
-        match analyze_transaction(&client, &detector, target_signature).await {
-            Ok(_) => {
-                println!("\n分析完成！");
-            }
             Err(e) => {
-                error!("分析失败: {}", e);
-            }
-        }
-
-        // 等待用户按键继续
-        println!("\n按任意键继续输入新的交易哈希，或按 ESC 键退出...");
-        terminal::enable_raw_mode()?;
-        if let Event::Key(key) = event::read()? {
-            if key.code == KeyCode::Esc {
-                terminal::disable_raw_mode()?;
-                println!("\n程序退出。");
-                return Ok(());
+                error!("读取输入失败: {}", e);
+                break;
             }
         }
     }
+
+    Ok(())
 }
 
 async fn analyze_transaction(client: &SolanaClient, detector: &MevDetector, target_signature: &str) -> Result<(), Box<dyn std::error::Error>> {
-    match client.get_transaction(target_signature).await {
-        Ok(target_tx) => {
-            info!("获取目标交易信息成功，所在区块: {}", target_tx.slot);
+    // 获取目标交易
+    let target_tx = match client.get_transaction(target_signature).await {
+        Ok(tx) => tx,
+        Err(e) => {
+            error!("获取目标交易失败: {}", e);
+            return Err(e);
+        }
+    };
 
-            // 步骤 1: 检查是否为简单转账
-            if detector.is_simple_transfer(&target_tx) {
-                info!("✅ 该交易为简单转账，不涉及Swap，不会被MEV。");
+    info!("获取目标交易信息成功，所在区块: {}", target_tx.slot);
+
+    // 步骤 1: 检查是否为简单转账
+    if detector.is_simple_transfer(&target_tx) {
+        info!("✅ 该交易为简单转账，不涉及Swap，不会被MEV。");
+        return Ok(());
+    }
+    
+    info!("该交易涉及Swap/DEX，继续分析MEV风险...");
+
+    // 步骤 2: 获取目标交易周围的交易（前4笔和后4笔）
+    let (nearby_transactions, target_index) = match client.get_nearby_transactions(target_signature).await {
+        Ok(result) => result,
+        Err(e) => {
+            error!("获取周围交易信息失败: {}", e);
+            info!("修改config.toml 中的rpc_url 或许可以解决问题");
+            return Err(e);
+        }
+    };
+
+    info!("获取目标交易周围的 {} 笔交易成功，开始分析...", nearby_transactions.len());
+
+    // 步骤 3: 检查前后非投票交易是否有Jito小费地址
+    let jito_tip_info = detector.check_jito_tip_in_nearby_transactions(&nearby_transactions, target_index);
+    
+    match jito_tip_info {
+        Some((tip_index, tip_account, tip_amount, nearby_hashes)) => {
+            info!("🔍 检测到临近交易存在Jito交易，可能被MEV，正在检测...");
+            
+            // 显示前后非投票交易的哈希
+            info!("📋 目标交易前后的{}笔非投票交易:", nearby_hashes.len());
+            for (i, hash) in nearby_hashes.iter().enumerate() {
+                if hash == &nearby_transactions[tip_index].signature {
+                    info!("  {}. https://solscan.io/tx/{} ⭐ (Jito小费交易)", i + 1, hash);
+                } else {
+                    info!("  {}. https://solscan.io/tx/{}", i + 1, hash);
+                }
+            }
+            
+            // 步骤 4: 构建Jito捆绑包
+            let jito_bundle = detector.build_jito_bundle(&nearby_transactions, tip_index, tip_account, tip_amount);
+
+            // 检查目标交易是否在捆绑包中
+            if !jito_bundle.bundle_transactions.iter().any(|tx| tx.signature == target_signature) {
+                info!("✅ 找到一个Jito捆绑包，但您的交易不在其中。初步判断没有被MEV。");
                 return Ok(());
             }
-            info!("该交易涉及Swap/DEX，继续分析MEV风险...");
 
-            // 步骤 2: 获取整个区块的交易
-            match client.get_full_block(target_tx.slot).await {
-                Ok(block_transactions) => {
-                    info!("获取区块 {} 的 {} 笔交易成功，开始分析...", target_tx.slot, block_transactions.len());
+            error!("🚨 检测到Jito捆绑包! Jito捆绑包最多包含5笔交易，您的交易是其中之一。");
+            info!("  -> 小费交易: https://solscan.io/tx/{}", jito_bundle.tip_tx_signature);
+            info!("  -> 小费地址: {}", jito_bundle.tip_account);
+            info!(
+                "  -> 小费金额: {} lamports ({:.9} SOL)",
+                jito_bundle.tip_amount_lamports,
+                jito_bundle.tip_amount_lamports as f64 / 1_000_000_000.0
+            );
+            
+            // 在这个已确认的捆绑包内进行三明治和抢跑分析
+            let bundle_with_tip = [jito_bundle.bundle_transactions.as_slice(), &[target_tx.clone()]].concat();
+            
+            if let Some(sandwich) = detector.detect_sandwich_attack(&bundle_with_tip, target_signature) {
+                error!("  🥪 在Jito捆绑包内检测到三明治攻击:");
+                info!("    前置交易: https://solscan.io/tx/{}", sandwich.front_tx);
+                info!("    后置交易: https://solscan.io/tx/{}", sandwich.back_tx);
+                info!("    预估用户损失: {:.6} SOL", sandwich.victim_loss_estimate);
+            } else {
+                info!("  ✅ 在Jito捆绑包内未检测到三明治攻击");
+            }
 
-                    let target_index = block_transactions.iter().position(|tx| tx.signature == target_signature);
-
-                    if let Some(index) = target_index {
-                        // 步骤 3: 检查前3笔和后4笔交易是否有Jito小费地址
-                        if detector.check_jito_tip_in_nearby_transactions(&block_transactions, index) {
-                            info!("🔍 检测到临近交易存在Jito交易，可能被MEV，正在检测...");
-                            
-                            // 步骤 4: 寻找Jito捆绑包
-                            if let Some(jito_bundle) = detector.find_jito_tip_and_bundle(&block_transactions, index) {
-                                // 检查目标交易是否在捆绑包中
-                                if jito_bundle.bundle_transactions.iter().any(|tx| tx.signature == target_signature) {
-                                    error!("🚨 检测到Jito捆绑包! Jito捆绑包最多包含5笔交易，您的交易是其中之一。");
-                                    info!("  -> 小费交易: https://solscan.io/tx/{}", jito_bundle.tip_tx_signature);
-                                    info!("  -> 小费地址: {}", jito_bundle.tip_account);
-                                    info!(
-                                        "  -> 小费金额: {} lamports ({:.9} SOL)",
-                                        jito_bundle.tip_amount_lamports,
-                                        jito_bundle.tip_amount_lamports as f64 / 1_000_000_000.0
-                                    );
-                                    
-                                    // 在这个已确认的捆绑包内进行三明治和抢跑分析
-                                    let bundle_with_tip = [jito_bundle.bundle_transactions.as_slice(), &[target_tx.clone()]].concat();
-                                    if let Some(sandwich) = detector.detect_sandwich_attack(&bundle_with_tip, target_signature) {
-                                        error!("  🥪 在Jito捆绑包内检测到三明治攻击:");
-                                        info!("    前置交易: https://solscan.io/tx/{}", sandwich.front_tx);
-                                        info!("    后置交易: https://solscan.io/tx/{}", sandwich.back_tx);
-                                        info!("    预估用户损失: {:.6} SOL", sandwich.victim_loss_estimate);
-                                    } else {
-                                        info!("  ✅ 在Jito捆绑包内未检测到三明治攻击");
-                                    }
-
-                                    if let Some(frontrun) = detector.detect_frontrun_attack(&bundle_with_tip, target_signature) {
-                                        error!("  🏃 在Jito捆绑包内检测到抢跑攻击:");
-                                        info!("    抢跑交易: https://solscan.io/tx/{}", frontrun.front_tx);
-                                    } else {
-                                        info!("  ✅ 在Jito捆绑包内未检测到抢跑攻击");
-                                    }
-
-                                } else {
-                                    info!("✅ 找到一个Jito捆绑包，但您的交易不在其中。初步判断没有被MEV。");
-                                }
-                            } else {
-                                info!("✅ 临近交易虽然存在Jito地址，但未形成完整的捆绑包。初步判断没有被MEV。");
-                            }
-                        } else {
-                            info!("✅ 在前3笔和后4笔交易中未发现Jito小费地址。没有被MEV。");
-                        }
-                    } else {
-                        error!("在获取到的区块中未能定位到目标交易，可能由于RPC节点延迟。请稍后重试。");
-                    }
-                },
-                Err(e) => error!("获取完整区块信息失败: {}", e),
+            if let Some(frontrun) = detector.detect_frontrun_attack(&bundle_with_tip, target_signature) {
+                error!("  🏃 在Jito捆绑包内检测到抢跑攻击:");
+                info!("    抢跑交易: https://solscan.io/tx/{}", frontrun.front_tx);
+            } else {
+                info!("  ✅ 在Jito捆绑包内未检测到抢跑攻击");
             }
         }
-        Err(e) => error!("获取目标交易失败: {}", e),
+        None => {
+            info!("✅ 在前4笔和后4笔非投票交易中未发现Jito小费地址。");
+            info!("💡 这可能意味着:");
+            info!("   1. 确实没有被MEV攻击");
+            info!("   2. MEV攻击不是通过Jito进行的");
+        }
     }
 
     Ok(())

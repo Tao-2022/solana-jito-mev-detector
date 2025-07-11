@@ -91,6 +91,90 @@ impl SolanaClient {
         }
     }
 
+    /// 获取目标交易周围的非投票交易（前4笔和后4笔非投票交易）
+    ///
+    /// # 参数
+    /// - `target_signature`: 目标交易签名
+    ///
+    /// # 返回
+    /// `Result`，包含目标交易及其周围非投票交易的向量和目标交易在结果中的索引
+    pub async fn get_nearby_transactions(&self, target_signature: &str) -> Result<(Vec<Transaction>, usize), Box<dyn std::error::Error>> {
+        // 首先获取目标交易信息
+        let target_tx = self.get_transaction(target_signature).await?;
+        let slot = target_tx.slot;
+        
+        // 获取完整区块
+        let all_transactions = self.get_full_block(slot).await?;
+        
+        // 找到目标交易在区块中的索引
+        let target_index = all_transactions.iter()
+            .position(|tx| tx.signature == target_signature)
+            .ok_or("无法在区块中找到目标交易")?;
+        
+        // 收集前4笔非投票交易
+        let mut prev_non_vote_txs = Vec::new();
+        let mut count = 0;
+        for i in (0..target_index).rev() {
+            if count >= 4 {
+                break;
+            }
+            if !self.is_vote_transaction(&all_transactions[i]) {
+                prev_non_vote_txs.push(all_transactions[i].clone());
+                count += 1;
+            }
+        }
+        prev_non_vote_txs.reverse(); // 恢复正确顺序
+        
+        // 收集后4笔非投票交易
+        let mut next_non_vote_txs = Vec::new();
+        count = 0;
+        for i in (target_index + 1)..all_transactions.len() {
+            if count >= 4 {
+                break;
+            }
+            if !self.is_vote_transaction(&all_transactions[i]) {
+                next_non_vote_txs.push(all_transactions[i].clone());
+                count += 1;
+            }
+        }
+        
+        // 组合所有交易：前4笔非投票 + 目标交易 + 后4笔非投票
+        let mut nearby_transactions = Vec::new();
+        nearby_transactions.extend(prev_non_vote_txs);
+        let target_index_in_result = nearby_transactions.len(); // 目标交易在结果中的索引
+        nearby_transactions.push(target_tx);
+        nearby_transactions.extend(next_non_vote_txs);
+        
+        log::info!("获取到 {} 笔前置非投票交易，{} 笔后置非投票交易", 
+                  target_index_in_result, nearby_transactions.len() - target_index_in_result - 1);
+        
+        Ok((nearby_transactions, target_index_in_result))
+    }
+    
+    /// 检查交易是否为投票交易
+    fn is_vote_transaction(&self, tx: &Transaction) -> bool {
+        // 检查账户列表中是否包含投票程序账户
+        const VOTE_PROGRAM_ID: &str = "Vote111111111111111111111111111111111111111";
+        const STAKE_PROGRAM_ID: &str = "Stake11111111111111111111111111111111111111";
+        
+        let has_vote_account = tx.transaction.message.account_keys.iter().any(|account| {
+            account == VOTE_PROGRAM_ID || account == STAKE_PROGRAM_ID
+        });
+        
+        if has_vote_account {
+            return true;
+        }
+        
+        // 检查程序ID（作为备用检测）
+        tx.transaction.message.instructions.iter().any(|inst| {
+            if let Some(program_id) = &inst.program_id {
+                program_id == VOTE_PROGRAM_ID || program_id == STAKE_PROGRAM_ID
+            } else {
+                false
+            }
+        })
+    }
+
     /// 获取指定区块的完整信息，包含所有交易详情。
     ///
     /// # 参数

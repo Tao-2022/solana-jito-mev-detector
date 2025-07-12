@@ -7,7 +7,7 @@ mod mev;
 
 use crate::client::SolanaClient;
 use crate::mev::MevDetector;
-use log::{error, info, warn};
+use log::{error, info};
 
 #[derive(Debug, Deserialize)]
 struct Settings {
@@ -132,15 +132,15 @@ async fn analyze_transaction(
         }
     };
 
-    info!("获取目标交易信息成功，所在区块: {}", target_tx.slot);
+    info!("获取目标交易信息成功，区块: {}", target_tx.slot);
 
     // 步骤 1: 检查是否为简单转账
     if detector.is_simple_transfer(&target_tx) {
-        info!("✅ 该交易为简单转账，不涉及Swap，不会被MEV。");
+        println!("✅ 该交易为简单转账，不涉及Swap，无MEV风险。");
         return Ok(());
     }
 
-    info!("该交易涉及Swap/DEX，继续分析MEV风险...");
+    println!("🔍 该交易涉及Swap/DEX，开始MEV风险分析...");
 
     // 步骤 2: 获取目标交易周围的交易（前4笔和后4笔）
     let (nearby_transactions, target_index) =
@@ -148,104 +148,76 @@ async fn analyze_transaction(
             Ok(result) => result,
             Err(e) => {
                 error!("获取周围交易信息失败: {}", e);
-                info!("修改config.toml 中的rpc_url 或许可以解决问题");
+                println!("💡 修改config.toml中的rpc_url或许可以解决问题");
                 return Err(e);
             }
         };
 
-    info!(
-        "获取目标交易周围的 {} 笔交易成功，开始分析...",
-        nearby_transactions.len()
-    );
+    println!("📊 获取到周围{}笔交易，开始分析...", nearby_transactions.len());
 
     // 步骤 3: 检查前后交易是否有Jito小费地址
     let jito_tip_info =
         detector.check_jito_tip_in_nearby_transactions(&nearby_transactions, target_index);
 
     match jito_tip_info {
-        Some((tip_index, tip_account, tip_amount, is_tip_before_target, bundle_transactions)) => {
-            info!("🔍 检测到临近交易存在Jito交易，可能被MEV，正在检测...");
+        Some((tip_index, _tip_account, tip_amount, is_tip_before_target, bundle_transactions)) => {
+            println!("🎯 检测到Jito捆绑包交易，正在分析MEV攻击...");
 
-            let tip_position = if is_tip_before_target {
-                "前面"
-            } else {
-                "后面"
-            };
-            info!("📍 Jito小费交易位置: 在目标交易{}", tip_position);
+            let tip_position = if is_tip_before_target { "前" } else { "后" };
+            println!("📍 Jito小费位置: 目标交易{}方", tip_position);
+            println!("💰 小费金额: {:.6} SOL", tip_amount as f64 / 1_000_000_000.0);
 
-            // 显示捆绑包中的交易哈希
-            info!("📋 Jito捆绑包中的{}笔交易:", bundle_transactions.len());
+            // 显示捆绑包中的交易
+            println!("📦 捆绑包包含{}笔交易:", bundle_transactions.len());
             for (i, tx) in bundle_transactions.iter().enumerate() {
                 if tx.signature == nearby_transactions[tip_index].signature {
-                    warn!(
-                        "  {}. https://solscan.io/tx/{} ⭐ (Jito小费交易)",
-                        i + 1,
-                        tx.signature
-                    );
+                    println!("  {}. Jito小费交易 ⭐", i + 1);
                 } else if tx.signature == target_signature {
-                    info!(
-                        "  {}. https://solscan.io/tx/{} 🎯 (目标交易)",
-                        i + 1,
-                        tx.signature
-                    );
+                    println!("  {}. 目标交易 🎯", i + 1);
                 } else {
-                    info!("  {}. https://solscan.io/tx/{}", i + 1, tx.signature);
+                    println!("  {}. 其他交易", i + 1);
                 }
             }
 
-            info!(
-                "  -> 小费金额: {} lamports ({:.9} SOL)",
-                tip_amount,
-                tip_amount as f64 / 1_000_000_000.0
-            );
-
-            // 在这个已确认的捆绑包内进行三明治和抢跑分析（包含Jito交易本身）
+            // MEV攻击检测和结果展示
             if let Some(sandwich) =
                 detector.detect_sandwich_attack(&bundle_transactions, target_signature)
             {
-                error!("  🥪 检测到三明治攻击:");
-                info!("    前置交易: https://solscan.io/tx/{}", sandwich.front_tx);
-                info!("    后置交易: https://solscan.io/tx/{}", sandwich.back_tx);
-                info!("    账户交集: {:?}", sandwich.account_intersection);
+                println!("\n🚨 检测到三明治攻击!");
+                println!("  前置交易: https://solscan.io/tx/{}", sandwich.front_tx);
+                println!("  后置交易: https://solscan.io/tx/{}", sandwich.back_tx);
                 
                 // 显示损失计算结果
                 if let Some(loss) = &sandwich.user_loss {
-                    error!("  💸 估算用户损失:");
-                    error!("    损失金额: {} lamports ({:.6} SOL)", 
-                           loss.estimated_loss_lamports, 
-                           loss.estimated_loss_lamports as f64 / 1_000_000_000.0);
-                    error!("    损失百分比: {:.2}%", loss.loss_percentage);
-                    error!("    MEV攻击者利润: {} lamports ({:.6} SOL)", 
-                           loss.mev_profit_lamports,
-                           loss.mev_profit_lamports as f64 / 1_000_000_000.0);
-                    info!("    计算方法: {}", loss.calculation_method);
+                    println!("\n💸 用户损失估算:");
+                    println!("  损失金额: {:.6} SOL", loss.estimated_loss_lamports as f64 / 1_000_000_000.0);
+                    println!("  损失百分比: {:.2}%", loss.loss_percentage);
+                    println!("  MEV利润: {:.6} SOL", loss.mev_profit_lamports as f64 / 1_000_000_000.0);
+                    println!("  计算方法: {}", loss.calculation_method);
                 } else {
-                    warn!("    ⚠️ 无法计算具体损失金额");
+                    println!("  ⚠️ 无法计算具体损失金额");
                 }
                 
-                info!("  ℹ️ 检测到三明治攻击，跳过抢跑检测（避免重复报告）");
+                println!("  ℹ️ 已跳过抢跑检测（避免重复报告）");
             } else {
-                info!("  ✅ 未检测到三明治攻击");
-                
                 // 只有在未检测到三明治攻击时才检测抢跑攻击
                 if let Some(frontrun) =
                     detector.detect_frontrun_attack(&bundle_transactions, target_signature)
                 {
-                    error!("  🏃 检测到抢跑攻击:");
-                    info!("    抢跑交易: https://solscan.io/tx/{}", frontrun.front_tx);
-                    info!("    账户交集: {:?}", frontrun.account_intersection);
+                    println!("\n🚨 检测到抢跑攻击!");
+                    println!("  抢跑交易: https://solscan.io/tx/{}", frontrun.front_tx);
                 } else {
-                    info!("  ✅ 未检测到抢跑攻击");
+                    println!("\n✅ 未检测到MEV攻击");
                 }
             }
 
-            warn!(" ⚠️ 解析不一定正确，如果临近交易有给jito的小费的交易，请根据日志信息再次确认");
+            println!("\n⚠️ 注意: 检测结果仅供参考，建议结合实际交易数据验证");
         }
         None => {
-            info!("✅ 在前4笔和后4笔交易中未发现Jito小费地址。");
-            info!("💡 这可能意味着:");
-            info!("   1. 确实没有被MEV攻击");
-            info!("   2. MEV攻击不是通过Jito捆绑包进行的");
+            println!("✅ 未发现Jito小费交易");
+            println!("💡 这可能意味着:");
+            println!("   • 确实没有被MEV攻击");
+            println!("   • MEV攻击不是通过Jito捆绑包进行的");
         }
     }
 

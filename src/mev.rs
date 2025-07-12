@@ -1,6 +1,6 @@
 use crate::client::Transaction;
 use bs58;
-use log::{debug, error, info, warn};
+use log::{debug, info};
 use std::collections::HashSet;
 
 pub struct MevDetector;
@@ -212,42 +212,15 @@ impl MevDetector {
         block_transactions: &[Transaction],
         target_index: usize,
     ) -> Option<(usize, String, u64, bool, Vec<Transaction>)> {
-        // 打印交易信息
-        info!("🔍 开始检查前后交易是否包含Jito小费:");
-        let mut prev_count = 0;
-        let mut next_count = 0;
-
-        for (i, tx) in block_transactions.iter().enumerate() {
-            if i < target_index {
-                prev_count += 1;
-                info!(
-                    "    前第{}笔: https://solscan.io/tx/{}",
-                    prev_count, tx.signature
-                );
-            } else if i > target_index {
-                next_count += 1;
-                info!(
-                    "    后第{}笔: https://solscan.io/tx/{}",
-                    next_count, tx.signature
-                );
-            }
-        }
-
         // 先检查目标交易前面的交易
         for i in (0..target_index).rev() {
             let tx = &block_transactions[i];
             if let Some((tip_account, tip_amount)) = self.check_single_transaction_for_jito_tip(tx)
             {
-                info!("✅ 在目标交易前面发现Jito小费交易，构建捆绑包...");
+                info!("在目标交易前发现Jito小费交易");
                 // Jito小费在前面，捆绑该交易+往后4个交易（包含目标交易）
                 let bundle_end = (i + 5).min(block_transactions.len());
                 let bundle_transactions = block_transactions[i..bundle_end].to_vec();
-                info!(
-                    "📦 构建捆绑包: 从索引{}到{} (共{}个交易)",
-                    i,
-                    bundle_end - 1,
-                    bundle_transactions.len()
-                );
                 return Some((i, tip_account, tip_amount, true, bundle_transactions));
             }
         }
@@ -257,68 +230,35 @@ impl MevDetector {
             let tx = &block_transactions[i];
             if let Some((tip_account, tip_amount)) = self.check_single_transaction_for_jito_tip(tx)
             {
-                info!("✅ 在目标交易后面发现Jito小费交易，构建捆绑包...");
+                info!("在目标交易后发现Jito小费交易");
                 // Jito小费在后面，捆绑该交易+往前4个交易（包含目标交易）
                 let bundle_start = i.saturating_sub(4);
                 let bundle_transactions = block_transactions[bundle_start..=i].to_vec();
-                info!(
-                    "📦 构建捆绑包: 从索引{}到{} (共{}个交易)",
-                    bundle_start,
-                    i,
-                    bundle_transactions.len()
-                );
                 return Some((i, tip_account, tip_amount, false, bundle_transactions));
             }
         }
 
-        info!("❌ 在前后交易中未发现Jito小费交易");
         None
     }
 
     /// 检查单个交易是否包含Jito小费
     /// 返回: (小费地址, 小费金额)
     fn check_single_transaction_for_jito_tip(&self, tx: &Transaction) -> Option<(String, u64)> {
-        use log::{debug, info};
-
-        info!("🔍 检查交易: {}", tx.signature);
-
-        // 调试：打印所有账户
-        debug!(
-            "  📋 交易账户列表 ({} 个账户):",
-            tx.transaction.message.account_keys.len()
-        );
-        for (i, account) in tx.transaction.message.account_keys.iter().enumerate() {
-            debug!("    [{}] {}", i, account);
-        }
-
         // 首先找到所有Jito小费地址在账户列表中的索引
         let mut jito_tip_indices = Vec::new();
         for (account_index, account) in tx.transaction.message.account_keys.iter().enumerate() {
             if JITO_TIP_ACCOUNTS.contains(&account.as_str()) {
                 jito_tip_indices.push((account_index, account.clone()));
-                info!(
-                    "   在账户索引 {} 发现Jito小费地址: {}",
-                    account_index, account
-                );
+                debug!("发现Jito小费地址: {}", account);
             }
         }
 
         if jito_tip_indices.is_empty() {
-            // 检查是否有任何账户看起来像Jito小费地址（调试用）
-            info!("  交易账户列表中未包含已知Jito小费地址");
-            for jito_addr in JITO_TIP_ACCOUNTS.iter() {
-                info!("    - {}", jito_addr);
-            }
             return None;
         }
 
-        warn!(
-            "  ⚠️ 交易账户列表中包含 {} 个Jito小费地址，开始解析指令",
-            jito_tip_indices.len()
-        );
-
         // 检查每个指令是否包含Jito小费地址的索引
-        for (inst_idx, instruction) in tx.transaction.message.instructions.iter().enumerate() {
+        for instruction in &tx.transaction.message.instructions {
             // 获取程序ID
             let program_id = tx
                 .transaction
@@ -326,27 +266,13 @@ impl MevDetector {
                 .account_keys
                 .get(instruction.program_id_index as usize);
 
-            debug!(
-                "  指令 {}: program_id_index = {}, program_id = {:?}, accounts = {:?}",
-                inst_idx, instruction.program_id_index, program_id, instruction.accounts
-            );
-
             // 检查指令的账户索引列表是否包含任何Jito小费地址的索引
             for &account_index in &instruction.accounts {
                 for &(jito_index, ref jito_address) in &jito_tip_indices {
                     if account_index as usize == jito_index {
-                        debug!(
-                            " ⚠️ 交易账户列表中包含 指令 {} 的账户索引 {} 匹配Jito小费地址: {}",
-                            inst_idx, account_index, jito_address
-                        );
-
                         // 进一步检查是否为系统程序转账指令
                         if program_id == Some(&SYSTEM_PROGRAM_ID.to_string()) {
-                            debug!(" ✅ 确认为系统程序指令，分析转账金额");
-
                             if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
-                                debug!("   指令数据长度: {}, 数据: {:?}", data.len(), data);
-
                                 // 检查多种可能的转账指令格式
                                 let amount = if data.len() == 12 && data[0..4] == [2, 0, 0, 0] {
                                     // 标准系统程序转账格式
@@ -362,33 +288,20 @@ impl MevDetector {
                                         u64::from_le_bytes(data[0..8].try_into().unwrap())
                                     }
                                 } else {
-                                    error!("    ❌ 无法解析转账金额，数据长度: {}", data.len());
                                     0
                                 };
 
                                 if amount > 0 {
-                                    info!(
-                                        "    💰 Jito小费金额: {} lamports ({:.9} SOL)",
-                                        amount,
-                                        amount as f64 / 1_000_000_000.0
-                                    );
-                                    // 返回小费地址和金额
+                                    debug!("解析到Jito小费: {} lamports", amount);
                                     return Some((jito_address.clone(), amount));
-                                } else {
-                                    debug!("    ❌ 无法解析有效的转账金额");
                                 }
-                            } else {
-                                debug!("    ❌ 无法解码指令数据");
                             }
-                        } else {
-                            debug!("    ❌ 不是系统程序指令: {:?}", program_id);
                         }
                     }
                 }
             }
         }
 
-        debug!("  ❌ 虽然账户列表包含Jito小费地址，但未在指令中找到相关转账");
         None
     }
 
@@ -414,8 +327,7 @@ impl MevDetector {
             return None;
         }
 
-        info!("🎯 目标交易过滤后账户数量: {}", target_accounts.len());
-        debug!("🎯 目标交易过滤后账户列表: {:?}", target_accounts);
+        debug!("目标交易过滤后账户数量: {}", target_accounts.len());
         
         // 寻找前两个交易中与目标交易有账户交集的交易
         let mut front_candidates = Vec::new();
@@ -465,10 +377,7 @@ impl MevDetector {
                 );
                 
                 if intersection_similarity >= 0.7 { // 70%以上相似度认为是同一个池子
-                    info!("🥪 发现三明治攻击模式: 前后交易与目标交易有相似的账户交集");
-                    info!("  前置交易账户交集: {:?}", front_intersection);
-                    info!("  后置交易账户交集: {:?}", back_intersection);
-                    info!("  交集相似度: {:.2}%", intersection_similarity * 100.0);
+                    info!("检测到三明治攻击模式，交集相似度: {:.1}%", intersection_similarity * 100.0);
                     
                     // 合并前后交易的账户交集作为最终交集
                     let mut combined_intersection = front_intersection.clone();
@@ -522,7 +431,7 @@ impl MevDetector {
             return None;
         }
 
-        debug!("🎯 抢跑检测 - 目标交易过滤后账户数量: {}", target_accounts.len());
+        debug!("抢跑检测 - 目标交易过滤后账户数量: {}", target_accounts.len());
 
         // 在目标交易前面的几个交易中寻找抢跑攻击
         for i in (0..target_index).rev() {
@@ -544,8 +453,7 @@ impl MevDetector {
 
             // 如果存在账户交集，则判定为抢跑攻击
             if !intersection.is_empty() {
-                info!("🏃 发现抢跑攻击模式: 前置交易与目标交易存在账户交集");
-                info!("  账户交集: {:?}", intersection);
+                info!("检测到抢跑攻击模式，共享账户数: {}", intersection.len());
                 
                 return Some(FrontrunDetails {
                     front_tx: potential_frontrun.signature.clone(),
@@ -772,7 +680,7 @@ impl MevDetector {
         back_tx_sig: &str,
         shared_accounts: &[String],
     ) -> Option<UserLoss> {
-        info!("🧮 开始计算三明治攻击损失...");
+        debug!("开始计算三明治攻击损失");
         
         // 获取三笔交易
         let target_tx = &transactions[target_index];
@@ -781,7 +689,7 @@ impl MevDetector {
         
         // 方法1: 分析攻击者的SOL余额变化 (通过Jito小费推断)
         if let Some(loss) = self.analyze_sol_balance_changes(front_tx, target_tx, back_tx) {
-            info!("💡 使用SOL余额变化分析法计算损失");
+            debug!("使用SOL余额变化分析法计算损失");
             return Some(loss);
         }
         
@@ -789,13 +697,13 @@ impl MevDetector {
         if let Some(loss) = self.analyze_shared_account_changes(
             front_tx, target_tx, back_tx, shared_accounts
         ) {
-            info!("💡 使用共享账户状态变化分析法计算损失");
+            debug!("使用共享账户状态变化分析法计算损失");
             return Some(loss);
         }
         
         // 方法3: 基础估算 (基于交易复杂度)
         let basic_loss = self.estimate_basic_loss(target_tx);
-        info!("💡 使用基础估算法计算损失");
+        debug!("使用基础估算法计算损失");
         Some(basic_loss)
     }
     
@@ -823,9 +731,9 @@ impl MevDetector {
             let back_sol_amount = self.extract_sol_transfer_amount(back_tx);
             let target_sol_amount = self.extract_sol_transfer_amount(target_tx);
             
-            info!("  前置交易SOL转账: {} lamports", front_sol_amount);
-            info!("  目标交易SOL转账: {} lamports", target_sol_amount);
-            info!("  后置交易SOL转账: {} lamports", back_sol_amount);
+            debug!("前置交易SOL转账: {} lamports", front_sol_amount);
+            debug!("目标交易SOL转账: {} lamports", target_sol_amount);
+            debug!("后置交易SOL转账: {} lamports", back_sol_amount);
             
             // 估算MEV利润 = 后置交易收益 - 前置交易成本
             let mev_profit = back_sol_amount.saturating_sub(front_sol_amount);

@@ -1,6 +1,6 @@
 use crate::client::Transaction;
 use bs58;
-use log::{info, debug, warn, error};
+use log::{debug, error, info, warn};
 use std::collections::HashSet;
 
 pub struct MevDetector;
@@ -15,7 +15,6 @@ pub struct FrontrunDetails {
     pub front_tx: String,
     pub victim_tx: String,
 }
-
 
 // 主要 DEX 程序 ID
 const RAYDIUM_AMM_PROGRAM_ID: &str = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
@@ -52,7 +51,12 @@ impl MevDetector {
     /// 检查交易是否为简单的转账（仅涉及系统程序或Memo程序）。
     pub fn is_simple_transfer(&self, tx: &Transaction) -> bool {
         tx.transaction.message.instructions.iter().all(|inst| {
-            if let Some(program_id) = tx.transaction.message.account_keys.get(inst.program_id_index as usize) {
+            if let Some(program_id) = tx
+                .transaction
+                .message
+                .account_keys
+                .get(inst.program_id_index as usize)
+            {
                 ALLOWED_PROGRAMS_FOR_SIMPLE_TRANSFER.contains(&program_id.as_str())
             } else {
                 false
@@ -92,7 +96,12 @@ impl MevDetector {
 
         // 检查程序ID（作为备用检测）
         let has_vote_program = tx.transaction.message.instructions.iter().any(|inst| {
-            if let Some(program_id) = tx.transaction.message.account_keys.get(inst.program_id_index as usize) {
+            if let Some(program_id) = tx
+                .transaction
+                .message
+                .account_keys
+                .get(inst.program_id_index as usize)
+            {
                 program_id == VOTE_PROGRAM_ID || program_id == STAKE_PROGRAM_ID
             } else {
                 false
@@ -158,12 +167,18 @@ impl MevDetector {
         // 先检查目标交易前面的交易
         for i in (0..target_index).rev() {
             let tx = &block_transactions[i];
-            if let Some((tip_account, tip_amount)) = self.check_single_transaction_for_jito_tip(tx) {
+            if let Some((tip_account, tip_amount)) = self.check_single_transaction_for_jito_tip(tx)
+            {
                 info!("✅ 在目标交易前面发现Jito小费交易，构建捆绑包...");
                 // Jito小费在前面，捆绑该交易+往后4个交易（包含目标交易）
                 let bundle_end = (i + 5).min(block_transactions.len());
                 let bundle_transactions = block_transactions[i..bundle_end].to_vec();
-                info!("📦 构建捆绑包: 从索引{}到{} (共{}个交易)", i, bundle_end - 1, bundle_transactions.len());
+                info!(
+                    "📦 构建捆绑包: 从索引{}到{} (共{}个交易)",
+                    i,
+                    bundle_end - 1,
+                    bundle_transactions.len()
+                );
                 return Some((i, tip_account, tip_amount, true, bundle_transactions));
             }
         }
@@ -171,12 +186,18 @@ impl MevDetector {
         // 再检查目标交易后面的交易
         for i in (target_index + 1)..block_transactions.len() {
             let tx = &block_transactions[i];
-            if let Some((tip_account, tip_amount)) = self.check_single_transaction_for_jito_tip(tx) {
+            if let Some((tip_account, tip_amount)) = self.check_single_transaction_for_jito_tip(tx)
+            {
                 info!("✅ 在目标交易后面发现Jito小费交易，构建捆绑包...");
                 // Jito小费在后面，捆绑该交易+往前4个交易（包含目标交易）
                 let bundle_start = i.saturating_sub(4);
                 let bundle_transactions = block_transactions[bundle_start..=i].to_vec();
-                info!("📦 构建捆绑包: 从索引{}到{} (共{}个交易)", bundle_start, i, bundle_transactions.len());
+                info!(
+                    "📦 构建捆绑包: 从索引{}到{} (共{}个交易)",
+                    bundle_start,
+                    i,
+                    bundle_transactions.len()
+                );
                 return Some((i, tip_account, tip_amount, false, bundle_transactions));
             }
         }
@@ -187,16 +208,16 @@ impl MevDetector {
 
     /// 检查单个交易是否包含Jito小费
     /// 返回: (小费地址, 小费金额)
-    fn check_single_transaction_for_jito_tip(
-        &self,
-        tx: &Transaction,
-    ) -> Option<(String, u64)> {
+    fn check_single_transaction_for_jito_tip(&self, tx: &Transaction) -> Option<(String, u64)> {
         use log::{debug, info};
 
         info!("🔍 检查交易: {}", tx.signature);
-        
+
         // 调试：打印所有账户
-        debug!("  📋 交易账户列表 ({} 个账户):", tx.transaction.message.account_keys.len());
+        debug!(
+            "  📋 交易账户列表 ({} 个账户):",
+            tx.transaction.message.account_keys.len()
+        );
         for (i, account) in tx.transaction.message.account_keys.iter().enumerate() {
             debug!("    [{}] {}", i, account);
         }
@@ -206,7 +227,10 @@ impl MevDetector {
         for (account_index, account) in tx.transaction.message.account_keys.iter().enumerate() {
             if JITO_TIP_ACCOUNTS.contains(&account.as_str()) {
                 jito_tip_indices.push((account_index, account.clone()));
-                info!("   在账户索引 {} 发现Jito小费地址: {}", account_index, account);
+                info!(
+                    "   在账户索引 {} 发现Jito小费地址: {}",
+                    account_index, account
+                );
             }
         }
 
@@ -219,38 +243,40 @@ impl MevDetector {
             return None;
         }
 
-        warn!("  ⚠️ 交易账户列表中包含 {} 个Jito小费地址，开始解析指令", jito_tip_indices.len());
+        warn!(
+            "  ⚠️ 交易账户列表中包含 {} 个Jito小费地址，开始解析指令",
+            jito_tip_indices.len()
+        );
 
         // 检查每个指令是否包含Jito小费地址的索引
         for (inst_idx, instruction) in tx.transaction.message.instructions.iter().enumerate() {
             // 获取程序ID
-            let program_id = tx.transaction.message.account_keys.get(instruction.program_id_index as usize);
-            
+            let program_id = tx
+                .transaction
+                .message
+                .account_keys
+                .get(instruction.program_id_index as usize);
+
             debug!(
                 "  指令 {}: program_id_index = {}, program_id = {:?}, accounts = {:?}",
-                inst_idx,
-                instruction.program_id_index,
-                program_id,
-                instruction.accounts
+                inst_idx, instruction.program_id_index, program_id, instruction.accounts
             );
 
             // 检查指令的账户索引列表是否包含任何Jito小费地址的索引
             for &account_index in &instruction.accounts {
                 for &(jito_index, ref jito_address) in &jito_tip_indices {
                     if account_index as usize == jito_index {
-                        debug!(" ⚠️ 交易账户列表中包含 指令 {} 的账户索引 {} 匹配Jito小费地址: {}", 
-                             inst_idx, account_index, jito_address);
-                        
+                        debug!(
+                            " ⚠️ 交易账户列表中包含 指令 {} 的账户索引 {} 匹配Jito小费地址: {}",
+                            inst_idx, account_index, jito_address
+                        );
+
                         // 进一步检查是否为系统程序转账指令
                         if program_id == Some(&SYSTEM_PROGRAM_ID.to_string()) {
                             debug!(" ✅ 确认为系统程序指令，分析转账金额");
-                            
+
                             if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
-                                debug!(
-                                    "   指令数据长度: {}, 数据: {:?}",
-                                    data.len(),
-                                    data
-                                );
+                                debug!("   指令数据长度: {}, 数据: {:?}", data.len(), data);
 
                                 // 检查多种可能的转账指令格式
                                 let amount = if data.len() == 12 && data[0..4] == [2, 0, 0, 0] {
@@ -272,8 +298,11 @@ impl MevDetector {
                                 };
 
                                 if amount > 0 {
-                                    info!("    💰 Jito小费金额: {} lamports ({:.9} SOL)", 
-                                         amount, amount as f64 / 1_000_000_000.0);
+                                    info!(
+                                        "    💰 Jito小费金额: {} lamports ({:.9} SOL)",
+                                        amount,
+                                        amount as f64 / 1_000_000_000.0
+                                    );
                                     // 返回小费地址和金额
                                     return Some((jito_address.clone(), amount));
                                 } else {
@@ -293,7 +322,6 @@ impl MevDetector {
         debug!("  ❌ 虽然账户列表包含Jito小费地址，但未在指令中找到相关转账");
         None
     }
-
 
     /// 检测交易列表中是否存在三明治攻击 - 基于账户比较的改进版本
     pub fn detect_sandwich_attack(
@@ -452,7 +480,12 @@ impl MevDetector {
         ];
 
         let has_known_dex = tx.transaction.message.instructions.iter().any(|inst| {
-            if let Some(program_id) = tx.transaction.message.account_keys.get(inst.program_id_index as usize) {
+            if let Some(program_id) = tx
+                .transaction
+                .message
+                .account_keys
+                .get(inst.program_id_index as usize)
+            {
                 DEX_PROGRAMS.contains(&program_id.as_str())
             } else {
                 false
@@ -482,7 +515,12 @@ impl MevDetector {
 
         // 检查是否有非系统程序的指令
         let has_non_system_instructions = tx.transaction.message.instructions.iter().any(|inst| {
-            if let Some(program_id) = tx.transaction.message.account_keys.get(inst.program_id_index as usize) {
+            if let Some(program_id) = tx
+                .transaction
+                .message
+                .account_keys
+                .get(inst.program_id_index as usize)
+            {
                 program_id != SYSTEM_PROGRAM_ID && program_id != MEMO_PROGRAM_ID
             } else {
                 false
@@ -516,7 +554,12 @@ impl MevDetector {
 
         // 获取所有非系统程序的账户
         for instruction in &tx.transaction.message.instructions {
-            if let Some(program_id) = tx.transaction.message.account_keys.get(instruction.program_id_index as usize) {
+            if let Some(program_id) = tx
+                .transaction
+                .message
+                .account_keys
+                .get(instruction.program_id_index as usize)
+            {
                 if program_id != SYSTEM_PROGRAM_ID {
                     for &acc_index in &instruction.accounts {
                         if let Some(account) =

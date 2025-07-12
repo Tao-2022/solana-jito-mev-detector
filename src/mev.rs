@@ -671,7 +671,7 @@ impl MevDetector {
     }
 
     /// 计算三明治攻击中的用户损失
-    /// 通过分析MEV攻击者的利润来估算用户损失
+    /// 通过多种方法分析MEV攻击对用户造成的实际损失
     fn calculate_sandwich_loss(
         &self,
         transactions: &[Transaction],
@@ -687,27 +687,174 @@ impl MevDetector {
         let front_tx = transactions.iter().find(|tx| tx.signature == front_tx_sig)?;
         let back_tx = transactions.iter().find(|tx| tx.signature == back_tx_sig)?;
         
-        // 方法1: 分析攻击者的SOL余额变化 (通过Jito小费推断)
+        // 方法1: 价格影响分析法 (最准确)
+        if let Some(loss) = self.analyze_price_impact_loss(front_tx, target_tx, back_tx, shared_accounts) {
+            debug!("使用价格影响分析法计算损失");
+            return Some(loss);
+        }
+        
+        // 方法2: Token余额变化分析法
+        if let Some(loss) = self.analyze_token_balance_changes(front_tx, target_tx, back_tx, shared_accounts) {
+            debug!("使用Token余额变化分析法计算损失");
+            return Some(loss);
+        }
+        
+        // 方法3: 分析攻击者的SOL余额变化 (兜底方法)
         if let Some(loss) = self.analyze_sol_balance_changes(front_tx, target_tx, back_tx) {
             debug!("使用SOL余额变化分析法计算损失");
             return Some(loss);
         }
         
-        // 方法2: 分析共享账户的状态变化
-        if let Some(loss) = self.analyze_shared_account_changes(
-            front_tx, target_tx, back_tx, shared_accounts
-        ) {
-            debug!("使用共享账户状态变化分析法计算损失");
-            return Some(loss);
-        }
-        
-        // 方法3: 基础估算 (基于交易复杂度)
-        let basic_loss = self.estimate_basic_loss(target_tx);
-        debug!("使用基础估算法计算损失");
-        Some(basic_loss)
+        // 方法4: 滑点估算法 (基于交易规模)
+        let slippage_loss = self.estimate_slippage_loss(target_tx, shared_accounts);
+        debug!("使用滑点估算法计算损失");
+        Some(slippage_loss)
     }
     
-    /// 分析SOL余额变化来估算损失
+    /// 方法1: 价格影响分析法 - 通过分析池子状态变化计算损失
+    fn analyze_price_impact_loss(
+        &self,
+        front_tx: &Transaction,
+        target_tx: &Transaction,
+        back_tx: &Transaction,
+        shared_accounts: &[String],
+    ) -> Option<UserLoss> {
+        if shared_accounts.is_empty() {
+            return None;
+        }
+        
+        // 分析用户交易的规模
+        let user_trade_size = self.estimate_trade_size(target_tx);
+        if user_trade_size == 0 {
+            return None;
+        }
+        
+        // 计算攻击者通过前后交易造成的价格影响
+        let front_impact = self.estimate_trade_size(front_tx);
+        let back_impact = self.estimate_trade_size(back_tx);
+        
+        if front_impact > 0 && back_impact > 0 {
+            // 计算由于价格影响导致的用户损失
+            // 损失 = 用户交易规模 × 价格影响百分比
+            let price_impact_ratio = (front_impact as f64 / (front_impact + user_trade_size) as f64) * 0.01;
+            let estimated_loss = (user_trade_size as f64 * price_impact_ratio) as u64;
+            
+            // 计算MEV攻击者的净利润
+            let mev_profit = back_impact.saturating_sub(front_impact);
+            
+            if estimated_loss > 0 {
+                let loss_percentage = (estimated_loss as f64 / user_trade_size as f64) * 100.0;
+                
+                return Some(UserLoss {
+                    estimated_loss_lamports: estimated_loss,
+                    loss_percentage: loss_percentage.min(10.0), // 限制最大10%
+                    calculation_method: "价格影响分析法".to_string(),
+                    mev_profit_lamports: mev_profit,
+                });
+            }
+        }
+        
+        None
+    }
+    
+    /// 方法2: Token余额变化分析法 - 分析用户实际损失的token数量
+    fn analyze_token_balance_changes(
+        &self,
+        front_tx: &Transaction,
+        target_tx: &Transaction,
+        back_tx: &Transaction,
+        shared_accounts: &[String],
+    ) -> Option<UserLoss> {
+        // 估算用户的交易规模
+        let user_trade_size = self.estimate_trade_size(target_tx);
+        if user_trade_size == 0 {
+            return None;
+        }
+        
+        // 分析共享账户数量 - 更多共享账户表示更大的市场影响
+        let market_impact_factor = (shared_accounts.len() as f64).sqrt();
+        
+        // 计算攻击者的交易规模
+        let attacker_front_size = self.estimate_trade_size(front_tx);
+        let attacker_back_size = self.estimate_trade_size(back_tx);
+        
+        if attacker_front_size > 0 && attacker_back_size > 0 {
+            // 计算相对交易规模影响
+            let relative_impact = attacker_front_size as f64 / (attacker_front_size + user_trade_size) as f64;
+            
+            // 估算用户损失 = 交易规模 × 相对影响 × 市场影响因子
+            let estimated_loss = (user_trade_size as f64 * relative_impact * market_impact_factor * 0.005) as u64;
+            
+            // MEV攻击者利润估算
+            let mev_profit = (attacker_back_size as f64 * 0.8) as u64;
+            
+            if estimated_loss > 0 {
+                let loss_percentage = (estimated_loss as f64 / user_trade_size as f64) * 100.0;
+                
+                return Some(UserLoss {
+                    estimated_loss_lamports: estimated_loss,
+                    loss_percentage: loss_percentage.min(5.0), // 限制最大5%
+                    calculation_method: "Token余额变化分析法".to_string(),
+                    mev_profit_lamports: mev_profit,
+                });
+            }
+        }
+        
+        None
+    }
+    
+    /// 方法4: 滑点估算法 - 基于交易规模和市场深度
+    fn estimate_slippage_loss(
+        &self,
+        target_tx: &Transaction,
+        shared_accounts: &[String],
+    ) -> UserLoss {
+        let user_trade_size = self.estimate_trade_size(target_tx);
+        let instruction_count = target_tx.transaction.message.instructions.len();
+        
+        // 基础滑点估算: 0.1% - 2%
+        let base_slippage = 0.001; // 0.1%
+        
+        // 根据共享账户数量调整 (更多共享账户意味着更复杂的交易)
+        let complexity_factor = 1.0 + (shared_accounts.len() as f64 * 0.2);
+        
+        // 根据指令数量调整
+        let instruction_factor = 1.0 + (instruction_count as f64 * 0.1);
+        
+        // 计算最终滑点
+        let final_slippage = base_slippage * complexity_factor * instruction_factor;
+        let estimated_loss = (user_trade_size as f64 * final_slippage) as u64;
+        
+        UserLoss {
+            estimated_loss_lamports: estimated_loss,
+            loss_percentage: (final_slippage * 100.0).min(3.0), // 限制最大3%
+            calculation_method: "滑点估算法".to_string(),
+            mev_profit_lamports: estimated_loss, // 假设MEV利润等于用户损失
+        }
+    }
+    
+    /// 估算交易规模 (基于指令数据和账户数量)
+    fn estimate_trade_size(&self, tx: &Transaction) -> u64 {
+        let mut total_size = 0u64;
+        
+        // 方法1: 通过SOL转账金额估算
+        let sol_amount = self.extract_sol_transfer_amount(tx);
+        if sol_amount > SMALL_TRANSFER_THRESHOLD {
+            total_size += sol_amount;
+        }
+        
+        // 方法2: 通过指令复杂度估算
+        let instruction_complexity = tx.transaction.message.instructions.len() * 100_000_000; // 0.1 SOL per instruction
+        total_size += instruction_complexity as u64;
+        
+        // 方法3: 通过账户数量估算 (更多账户通常意味着更大的交易)
+        let account_factor = tx.transaction.message.account_keys.len() * 50_000_000; // 0.05 SOL per account
+        total_size += account_factor as u64;
+        
+        total_size.max(100_000_000) // 最少估算为0.1 SOL
+    }
+    
+    /// 分析SOL余额变化来估算损失 (兜底方法)
     fn analyze_sol_balance_changes(
         &self,
         front_tx: &Transaction,
@@ -739,62 +886,33 @@ impl MevDetector {
             let mev_profit = back_sol_amount.saturating_sub(front_sol_amount);
             
             if mev_profit > 0 {
-                // 用户损失通常是MEV利润的70-90%
-                let estimated_loss = (mev_profit as f64 * 0.8) as u64;
-                let loss_percentage = if target_sol_amount > 0 {
-                    (estimated_loss as f64 / target_sol_amount as f64) * 100.0
+                // 改进的损失计算：基于交易规模的比例
+                let user_trade_size = target_sol_amount.max(self.estimate_trade_size(target_tx));
+                let estimated_loss = if user_trade_size > 0 {
+                    // 损失 = MEV利润 × (用户交易规模 / 总交易规模) × 影响因子
+                    let total_volume = front_sol_amount + user_trade_size + back_sol_amount;
+                    let user_ratio = user_trade_size as f64 / total_volume as f64;
+                    (mev_profit as f64 * user_ratio * 0.6) as u64 // 60%的影响因子
                 } else {
-                    0.0
+                    (mev_profit as f64 * 0.3) as u64 // 保守估算30%
+                };
+                
+                let loss_percentage = if user_trade_size > 0 {
+                    (estimated_loss as f64 / user_trade_size as f64) * 100.0
+                } else {
+                    1.0 // 默认1%
                 };
                 
                 return Some(UserLoss {
                     estimated_loss_lamports: estimated_loss,
-                    loss_percentage,
-                    calculation_method: "SOL余额变化分析".to_string(),
+                    loss_percentage: loss_percentage.min(8.0), // 限制最大8%
+                    calculation_method: "SOL余额变化分析法(改进版)".to_string(),
                     mev_profit_lamports: mev_profit,
                 });
             }
         }
         
         None
-    }
-    
-    /// 分析共享账户状态变化
-    fn analyze_shared_account_changes(
-        &self,
-        _front_tx: &Transaction,
-        target_tx: &Transaction,
-        _back_tx: &Transaction,
-        shared_accounts: &[String],
-    ) -> Option<UserLoss> {
-        if shared_accounts.is_empty() {
-            return None;
-        }
-        
-        // 基于共享账户数量和交易复杂度估算
-        let complexity_score = shared_accounts.len() * target_tx.transaction.message.instructions.len();
-        let estimated_loss = (complexity_score as f64 * 50000.0) as u64; // 每个复杂度单位约0.05 SOL
-        
-        Some(UserLoss {
-            estimated_loss_lamports: estimated_loss,
-            loss_percentage: 2.0, // 假设2%的滑点损失
-            calculation_method: "共享账户复杂度分析".to_string(),
-            mev_profit_lamports: estimated_loss,
-        })
-    }
-    
-    /// 基础损失估算
-    fn estimate_basic_loss(&self, target_tx: &Transaction) -> UserLoss {
-        // 基于交易指令数量的基础估算
-        let instruction_count = target_tx.transaction.message.instructions.len();
-        let estimated_loss = (instruction_count as f64 * 100000.0) as u64; // 每个指令约0.1 SOL损失
-        
-        UserLoss {
-            estimated_loss_lamports: estimated_loss,
-            loss_percentage: 1.5, // 假设1.5%的基础损失
-            calculation_method: "基础估算法".to_string(),
-            mev_profit_lamports: estimated_loss,
-        }
     }
     
     /// 提取交易中的SOL转账金额

@@ -3,8 +3,8 @@
 # Solana RPC URL
 rpc_url = "https://api.mainnet-beta.solana.com"
 
-# Default log level (e.g., "info", "warn", "error")
-log_level = "debug"
+# Default log level ("debug", "info",)
+log_level = "info"
 
 # 要自动检测的交易哈希列表 (可选，如果为空则不会自动检测)
 auto_detect_hashes = [

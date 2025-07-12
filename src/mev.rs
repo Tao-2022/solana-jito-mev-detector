@@ -44,6 +44,40 @@ const MEMO_PROGRAM_ID: &str = "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDgQdddcxFr";
 const VOTE_PROGRAM_ID: &str = "Vote111111111111111111111111111111111111111";
 // 添加更多可能的投票相关程序ID
 const STAKE_PROGRAM_ID: &str = "Stake11111111111111111111111111111111111111";
+
+// SPL Token 程序
+const TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+const ASSOCIATED_TOKEN_PROGRAM_ID: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
+
+// 常见的系统代币账户
+const WSOL_MINT: &str = "So11111111111111111111111111111111111111112"; // Wrapped SOL
+
+// Solana 核心程序
+const RENT_PROGRAM_ID: &str = "SysvarRent111111111111111111111111111111111";
+const CLOCK_PROGRAM_ID: &str = "SysvarC1ock11111111111111111111111111111111";
+const RECENT_BLOCKHASHES_PROGRAM_ID: &str = "SysvarRecentB1ockHashes11111111111111111111";
+const EPOCH_SCHEDULE_PROGRAM_ID: &str = "SysvarEpochSchedu1e111111111111111111111111";
+const FEES_PROGRAM_ID: &str = "SysvarFees111111111111111111111111111111111";
+const SLOT_HASHES_PROGRAM_ID: &str = "SysvarS1otHashes111111111111111111111111111";
+const SLOT_HISTORY_PROGRAM_ID: &str = "SysvarS1otHistory11111111111111111111111111";
+const STAKE_HISTORY_PROGRAM_ID: &str = "SysvarStakeHistory1111111111111111111111111";
+
+// BPF Loader 程序
+const BPF_LOADER_PROGRAM_ID: &str = "BPFLoader1111111111111111111111111111111111";
+const BPF_LOADER_2_PROGRAM_ID: &str = "BPFLoader2111111111111111111111111111111111";
+const BPF_LOADER_UPGRADEABLE_PROGRAM_ID: &str = "BPFLoaderUpgradeab1e11111111111111111111111";
+
+// 其他常见程序
+const CONFIG_PROGRAM_ID: &str = "Config1111111111111111111111111111111111111";
+const FEATURE_PROGRAM_ID: &str = "Feature111111111111111111111111111111111111";
+const COMPUTE_BUDGET_PROGRAM_ID: &str = "ComputeBudget111111111111111111111111111111";
+const ADDRESS_LOOKUP_TABLE_PROGRAM_ID: &str = "AddressLookupTab1e1111111111111111111111111";
+
+// Metaplex 相关程序（也很常见）
+const METAPLEX_TOKEN_METADATA_PROGRAM_ID: &str = "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s";
+const METAPLEX_AUCTION_HOUSE_PROGRAM_ID: &str = "hausS13jsjafwWwGqZTUQRmWyvyxn9EQpqMwV1PBBmk";
+
 const ALLOWED_PROGRAMS_FOR_SIMPLE_TRANSFER: [&str; 2] = [SYSTEM_PROGRAM_ID, MEMO_PROGRAM_ID];
 
 impl MevDetector {
@@ -130,6 +164,33 @@ impl MevDetector {
             MEMO_PROGRAM_ID,
             VOTE_PROGRAM_ID,
             STAKE_PROGRAM_ID,
+            // SPL Token 程序
+            TOKEN_PROGRAM_ID,
+            TOKEN_2022_PROGRAM_ID,
+            ASSOCIATED_TOKEN_PROGRAM_ID,
+            // 常见系统代币
+            WSOL_MINT,
+            // Solana 核心程序
+            RENT_PROGRAM_ID,
+            CLOCK_PROGRAM_ID,
+            RECENT_BLOCKHASHES_PROGRAM_ID,
+            EPOCH_SCHEDULE_PROGRAM_ID,
+            FEES_PROGRAM_ID,
+            SLOT_HASHES_PROGRAM_ID,
+            SLOT_HISTORY_PROGRAM_ID,
+            STAKE_HISTORY_PROGRAM_ID,
+            // BPF Loader 程序
+            BPF_LOADER_PROGRAM_ID,
+            BPF_LOADER_2_PROGRAM_ID,
+            BPF_LOADER_UPGRADEABLE_PROGRAM_ID,
+            // 其他常见程序
+            CONFIG_PROGRAM_ID,
+            FEATURE_PROGRAM_ID,
+            COMPUTE_BUDGET_PROGRAM_ID,
+            ADDRESS_LOOKUP_TABLE_PROGRAM_ID,
+            // Metaplex 相关程序
+            METAPLEX_TOKEN_METADATA_PROGRAM_ID,
+            METAPLEX_AUCTION_HOUSE_PROGRAM_ID,
         ];
 
         known_programs.contains(&account) || JITO_TIP_ACCOUNTS.contains(&account)
@@ -345,6 +406,7 @@ impl MevDetector {
         }
 
         info!("🎯 目标交易过滤后账户数量: {}", target_accounts.len());
+        debug!("🎯 目标交易过滤后账户列表: {:?}", target_accounts);
         
         // 寻找前两个交易中与目标交易有账户交集的交易
         let mut front_candidates = Vec::new();
@@ -441,6 +503,8 @@ impl MevDetector {
             return None;
         }
 
+        debug!("🎯 抢跑检测 - 目标交易过滤后账户数量: {}", target_accounts.len());
+
         // 在目标交易前面的几个交易中寻找抢跑攻击
         for i in (0..target_index).rev() {
             let potential_frontrun = &transactions[i];
@@ -475,11 +539,12 @@ impl MevDetector {
         None
     }
 
-    /// 提取交易中的过滤后账户（排除系统账户、Jito小费账户、小额转账账户）
+    /// 提取交易中的过滤后账户（只提取可写账户，排除Jito小费账户、小额转账账户）
     fn extract_filtered_accounts(&self, tx: &Transaction) -> HashSet<String> {
         let mut filtered_accounts = HashSet::new();
 
-        // 获取所有非系统程序的账户
+        // 直接检查账户的可写性，不依赖外部client
+        // 获取所有指令中的可写账户
         for instruction in &tx.transaction.message.instructions {
             if let Some(program_id) = tx
                 .transaction
@@ -487,9 +552,8 @@ impl MevDetector {
                 .account_keys
                 .get(instruction.program_id_index as usize)
             {
-                // 跳过系统程序指令
+                // 对于系统程序指令，检查是否为小额转账
                 if program_id == SYSTEM_PROGRAM_ID {
-                    // 对于系统程序指令，检查是否为小额转账
                     if self.is_small_transfer_instruction(instruction, &tx.transaction.message.account_keys) {
                         continue; // 跳过小额转账账户
                     }
@@ -497,9 +561,9 @@ impl MevDetector {
 
                 for &acc_index in &instruction.accounts {
                     if let Some(account) = tx.transaction.message.account_keys.get(acc_index as usize) {
-                        // 排除系统账户
-                        if account == SYSTEM_PROGRAM_ID || account == MEMO_PROGRAM_ID {
-                            continue;
+                        // 检查账户是否可写
+                        if !self.is_account_writable(acc_index as usize, &tx.transaction.message) {
+                            continue; // 跳过只读账户
                         }
                         
                         // 排除Jito小费账户
@@ -513,7 +577,43 @@ impl MevDetector {
             }
         }
 
+        // 额外过滤：确保账户地址有效
+        filtered_accounts.retain(|account| {
+            // 移除看起来像程序派生地址的长账户（超过44字符的通常是错误或特殊账户）
+            account.len() <= 44 &&
+            // 确保是有效的base58字符
+            account.chars().all(|c| "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz".contains(c))
+        });
+
         filtered_accounts
+    }
+
+    /// 判断指定索引的账户是否可写
+    fn is_account_writable(&self, account_index: usize, message: &crate::client::Message) -> bool {
+        if let Some(header) = &message.header {
+            let num_required_signatures = header.num_required_signatures as usize;
+            let num_readonly_signed_accounts = header.num_readonly_signed_accounts as usize;
+            let num_readonly_unsigned_accounts = header.num_readonly_unsigned_accounts as usize;
+            
+            // Solana账户排序：
+            // 1. 需要签名的可写账户 (0 to num_required_signatures - num_readonly_signed_accounts - 1)
+            // 2. 需要签名的只读账户 (num_required_signatures - num_readonly_signed_accounts to num_required_signatures - 1)
+            // 3. 不需要签名的可写账户 (num_required_signatures to account_keys.len() - num_readonly_unsigned_accounts - 1)
+            // 4. 不需要签名的只读账户 (account_keys.len() - num_readonly_unsigned_accounts to account_keys.len() - 1)
+            
+            if account_index < num_required_signatures {
+                // 需要签名的账户
+                account_index < (num_required_signatures - num_readonly_signed_accounts)
+            } else {
+                // 不需要签名的账户
+                let unsigned_start = num_required_signatures;
+                let readonly_unsigned_start = message.account_keys.len() - num_readonly_unsigned_accounts;
+                account_index >= unsigned_start && account_index < readonly_unsigned_start
+            }
+        } else {
+            // 如果没有header信息，无法判断，默认认为都可写（保守处理）
+            true
+        }
     }
 
     /// 检查指令是否为小额转账（小于0.001 SOL）

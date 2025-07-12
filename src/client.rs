@@ -24,6 +24,19 @@ pub struct Message {
     #[serde(rename = "accountKeys")]
     pub account_keys: Vec<String>,
     pub instructions: Vec<Instruction>,
+    #[serde(rename = "recentBlockhash")]
+    pub recent_blockhash: Option<String>,
+    pub header: Option<MessageHeader>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct MessageHeader {
+    #[serde(rename = "numRequiredSignatures")]
+    pub num_required_signatures: u8,
+    #[serde(rename = "numReadonlySignedAccounts")]
+    pub num_readonly_signed_accounts: u8,
+    #[serde(rename = "numReadonlyUnsignedAccounts")]
+    pub num_readonly_unsigned_accounts: u8,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -52,6 +65,34 @@ impl SolanaClient {
             rpc_url,
             client: Client::builder().timeout(Duration::from_secs(30)).build()?,
         })
+    }
+
+    /// 判断指定索引的账户是否可写
+    pub fn is_account_writable(&self, account_index: usize, message: &Message) -> bool {
+        if let Some(header) = &message.header {
+            let num_required_signatures = header.num_required_signatures as usize;
+            let num_readonly_signed_accounts = header.num_readonly_signed_accounts as usize;
+            let num_readonly_unsigned_accounts = header.num_readonly_unsigned_accounts as usize;
+            
+            // Solana账户排序：
+            // 1. 需要签名的可写账户 (0 to num_required_signatures - num_readonly_signed_accounts - 1)
+            // 2. 需要签名的只读账户 (num_required_signatures - num_readonly_signed_accounts to num_required_signatures - 1)
+            // 3. 不需要签名的可写账户 (num_required_signatures to account_keys.len() - num_readonly_unsigned_accounts - 1)
+            // 4. 不需要签名的只读账户 (account_keys.len() - num_readonly_unsigned_accounts to account_keys.len() - 1)
+            
+            if account_index < num_required_signatures {
+                // 需要签名的账户
+                account_index < (num_required_signatures - num_readonly_signed_accounts)
+            } else {
+                // 不需要签名的账户
+                let unsigned_start = num_required_signatures;
+                let readonly_unsigned_start = message.account_keys.len() - num_readonly_unsigned_accounts;
+                account_index >= unsigned_start && account_index < readonly_unsigned_start
+            }
+        } else {
+            // 如果没有header信息，无法判断，默认认为都可写（保守处理）
+            true
+        }
     }
 
     /// 获取指定签名的Solana交易详情。

@@ -13,6 +13,8 @@ use log::{error, info};
 struct Settings {
     rpc_url: String,
     log_level: String,
+    #[serde(default)]
+    auto_detect_hashes: Vec<String>,
 }
 
 #[tokio::main]
@@ -34,6 +36,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = SolanaClient::new(settings.rpc_url)?;
     let detector = MevDetector;
+
+    // 检查是否有自动检测的哈希列表
+    if !settings.auto_detect_hashes.is_empty() {
+        println!("\n🤖 检测到配置中有 {} 个预设的交易哈希，开始自动检测...", settings.auto_detect_hashes.len());
+        
+        for (index, hash) in settings.auto_detect_hashes.iter().enumerate() {
+            println!("\n{}", "=".repeat(80));
+            println!("🔄 自动检测 [{}/{}]: {}", index + 1, settings.auto_detect_hashes.len(), hash);
+            println!("{}", "=".repeat(80));
+            
+            match analyze_transaction(&client, &detector, hash).await {
+                Ok(_) => {
+                    println!("✅ 自动检测完成！");
+                }
+                Err(e) => {
+                    error!("❌ 自动检测失败: {}", e);
+                }
+            }
+        }
+        
+        println!("\n{}", "=".repeat(80));
+        println!("🎉 所有预设交易哈希检测完成！");
+        println!("{}", "=".repeat(80));
+    }
 
     loop {
         println!("\n请输入Solana交易哈希 (输入 'exit' 或 'quit' 退出):");
@@ -113,15 +139,15 @@ async fn analyze_transaction(client: &SolanaClient, detector: &MevDetector, targ
 
     info!("获取目标交易周围的 {} 笔交易成功，开始分析...", nearby_transactions.len());
 
-    // 步骤 3: 检查前后非投票交易是否有Jito小费地址
+    // 步骤 3: 检查前后交易是否有Jito小费地址
     let jito_tip_info = detector.check_jito_tip_in_nearby_transactions(&nearby_transactions, target_index);
     
     match jito_tip_info {
         Some((tip_index, tip_account, tip_amount, nearby_hashes)) => {
             info!("🔍 检测到临近交易存在Jito交易，可能被MEV，正在检测...");
             
-            // 显示前后非投票交易的哈希
-            info!("📋 目标交易前后的{}笔非投票交易:", nearby_hashes.len());
+            // 显示前后交易的哈希
+            info!("📋 目标交易前后的{}笔交易:", nearby_hashes.len());
             for (i, hash) in nearby_hashes.iter().enumerate() {
                 if hash == &nearby_transactions[tip_index].signature {
                     info!("  {}. https://solscan.io/tx/{} ⭐ (Jito小费交易)", i + 1, hash);
@@ -162,7 +188,7 @@ async fn analyze_transaction(client: &SolanaClient, detector: &MevDetector, targ
             }
         }
         None => {
-            info!("✅ 在前4笔和后4笔非投票交易中未发现Jito小费地址。");
+            info!("✅ 在前4笔和后4笔交易中未发现Jito小费地址。");
             info!("💡 这可能意味着:");
             info!("   1. 确实没有被MEV攻击");
             info!("   2. MEV攻击不是通过Jito捆绑包进行的");

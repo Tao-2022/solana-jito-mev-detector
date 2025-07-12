@@ -28,8 +28,8 @@ pub struct Message {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Instruction {
-    #[serde(rename = "programId")]
-    pub program_id: Option<String>,
+    #[serde(rename = "programIdIndex")]
+    pub program_id_index: u8,
     pub accounts: Vec<u8>,
     pub data: String,
 }
@@ -91,13 +91,13 @@ impl SolanaClient {
         }
     }
 
-    /// 获取目标交易周围的非投票交易（前4笔和后4笔非投票交易）
+    /// 获取目标交易周围的交易（前4笔和后4笔交易，包含所有类型）
     ///
     /// # 参数
     /// - `target_signature`: 目标交易签名
     ///
     /// # 返回
-    /// `Result`，包含目标交易及其周围非投票交易的向量和目标交易在结果中的索引
+    /// `Result`，包含目标交易及其周围交易的向量和目标交易在结果中的索引
     pub async fn get_nearby_transactions(&self, target_signature: &str) -> Result<(Vec<Transaction>, usize), Box<dyn std::error::Error>> {
         // 首先获取目标交易信息
         let target_tx = self.get_transaction(target_signature).await?;
@@ -111,41 +111,22 @@ impl SolanaClient {
             .position(|tx| tx.signature == target_signature)
             .ok_or("无法在区块中找到目标交易")?;
         
-        // 收集前4笔非投票交易
-        let mut prev_non_vote_txs = Vec::new();
-        let mut count = 0;
-        for i in (0..target_index).rev() {
-            if count >= 4 {
-                break;
-            }
-            if !self.is_vote_transaction(&all_transactions[i]) {
-                prev_non_vote_txs.push(all_transactions[i].clone());
-                count += 1;
-            }
-        }
-        prev_non_vote_txs.reverse(); // 恢复正确顺序
+        // 收集前4笔交易（包含所有类型）
+        let start_index = if target_index >= 4 { target_index - 4 } else { 0 };
+        let prev_txs = all_transactions[start_index..target_index].to_vec();
         
-        // 收集后4笔非投票交易
-        let mut next_non_vote_txs = Vec::new();
-        count = 0;
-        for i in (target_index + 1)..all_transactions.len() {
-            if count >= 4 {
-                break;
-            }
-            if !self.is_vote_transaction(&all_transactions[i]) {
-                next_non_vote_txs.push(all_transactions[i].clone());
-                count += 1;
-            }
-        }
+        // 收集后4笔交易（包含所有类型）
+        let end_index = (target_index + 5).min(all_transactions.len());
+        let next_txs = all_transactions[(target_index + 1)..end_index].to_vec();
         
-        // 组合所有交易：前4笔非投票 + 目标交易 + 后4笔非投票
+        // 组合所有交易：前4笔 + 目标交易 + 后4笔
         let mut nearby_transactions = Vec::new();
-        nearby_transactions.extend(prev_non_vote_txs);
+        nearby_transactions.extend(prev_txs);
         let target_index_in_result = nearby_transactions.len(); // 目标交易在结果中的索引
         nearby_transactions.push(target_tx);
-        nearby_transactions.extend(next_non_vote_txs);
+        nearby_transactions.extend(next_txs);
         
-        log::info!("获取到 {} 笔前置非投票交易，{} 笔后置非投票交易", 
+        log::info!("获取到 {} 笔前置交易，{} 笔后置交易（包含所有类型交易）", 
                   target_index_in_result, nearby_transactions.len() - target_index_in_result - 1);
         
         Ok((nearby_transactions, target_index_in_result))
@@ -167,7 +148,7 @@ impl SolanaClient {
         
         // 检查程序ID（作为备用检测）
         tx.transaction.message.instructions.iter().any(|inst| {
-            if let Some(program_id) = &inst.program_id {
+            if let Some(program_id) = tx.transaction.message.account_keys.get(inst.program_id_index as usize) {
                 program_id == VOTE_PROGRAM_ID || program_id == STAKE_PROGRAM_ID
             } else {
                 false

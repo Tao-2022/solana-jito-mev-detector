@@ -153,7 +153,10 @@ async fn analyze_transaction(
             }
         };
 
-    println!("📊 获取到周围{}笔交易，开始分析...", nearby_transactions.len());
+    println!(
+        "📊 获取到周围{}笔交易，开始分析...",
+        nearby_transactions.len()
+    );
 
     // 步骤 3: 检查前后交易是否有Jito小费地址
     let jito_tip_info =
@@ -165,7 +168,10 @@ async fn analyze_transaction(
 
             let tip_position = if is_tip_before_target { "前" } else { "后" };
             println!("📍 Jito小费位置: 目标交易{}方", tip_position);
-            println!("💰 小费金额: {:.6} SOL", tip_amount as f64 / 1_000_000_000.0);
+            println!(
+                "💰 小费金额: {:.6} SOL",
+                tip_amount as f64 / 1_000_000_000.0
+            );
 
             // 显示捆绑包中的交易
             println!("📦 捆绑包包含{}笔交易:", bundle_transactions.len());
@@ -187,18 +193,24 @@ async fn analyze_transaction(
                 println!("  前置交易: https://solscan.io/tx/{}", sandwich.front_tx);
                 println!("  后置交易: https://solscan.io/tx/{}", sandwich.back_tx);
                 println!("  共享账户数: {}", sandwich.account_intersection.len());
-                
+
                 // 显示损失计算结果
                 if let Some(loss) = &sandwich.user_loss {
                     println!("\n💸 用户损失估算:");
-                    println!("  损失金额: {:.6} SOL", loss.estimated_loss_lamports as f64 / 1_000_000_000.0);
+                    println!(
+                        "  损失金额: {:.6} SOL",
+                        loss.estimated_loss_lamports as f64 / 1_000_000_000.0
+                    );
                     println!("  损失百分比: {:.2}%", loss.loss_percentage);
-                    println!("  MEV利润: {:.6} SOL", loss.mev_profit_lamports as f64 / 1_000_000_000.0);
+                    println!(
+                        "  MEV利润: {:.6} SOL",
+                        loss.mev_profit_lamports as f64 / 1_000_000_000.0
+                    );
                     println!("  计算方法: {}", loss.calculation_method);
                 } else {
                     println!("  ⚠️ 无法计算具体损失金额");
                 }
-                
+
                 println!("  ℹ️ 已跳过抢跑检测（避免重复报告）");
             } else {
                 // 只有在未检测到三明治攻击时才检测抢跑攻击

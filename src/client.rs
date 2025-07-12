@@ -73,20 +73,21 @@ impl SolanaClient {
             let num_required_signatures = header.num_required_signatures as usize;
             let num_readonly_signed_accounts = header.num_readonly_signed_accounts as usize;
             let num_readonly_unsigned_accounts = header.num_readonly_unsigned_accounts as usize;
-            
+
             // Solana账户排序：
             // 1. 需要签名的可写账户 (0 to num_required_signatures - num_readonly_signed_accounts - 1)
             // 2. 需要签名的只读账户 (num_required_signatures - num_readonly_signed_accounts to num_required_signatures - 1)
             // 3. 不需要签名的可写账户 (num_required_signatures to account_keys.len() - num_readonly_unsigned_accounts - 1)
             // 4. 不需要签名的只读账户 (account_keys.len() - num_readonly_unsigned_accounts to account_keys.len() - 1)
-            
+
             if account_index < num_required_signatures {
                 // 需要签名的账户
                 account_index < (num_required_signatures - num_readonly_signed_accounts)
             } else {
                 // 不需要签名的账户
                 let unsigned_start = num_required_signatures;
-                let readonly_unsigned_start = message.account_keys.len() - num_readonly_unsigned_accounts;
+                let readonly_unsigned_start =
+                    message.account_keys.len() - num_readonly_unsigned_accounts;
                 account_index >= unsigned_start && account_index < readonly_unsigned_start
             }
         } else {

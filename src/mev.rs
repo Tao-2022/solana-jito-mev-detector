@@ -42,7 +42,7 @@ mod program_ids {
     pub const SERUM_DEX: &str = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin";
     pub const JUPITER: &str = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
     pub const PUMP_FUN: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
-    
+
     // 系统程序 ID
     pub const SYSTEM: &str = "11111111111111111111111111111111";
     pub const MEMO: &str = "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDgQdddcxFr";
@@ -70,10 +70,10 @@ const ALLOWED_PROGRAMS_FOR_SIMPLE_TRANSFER: [&str; 2] = [SYSTEM, MEMO];
 
 impl MevDetector {
     /// 检查交易是否为简单的转账（仅涉及系统程序或Memo程序）
-    /// 
+    ///
     /// # 参数
     /// * `tx` - 要检查的交易
-    /// 
+    ///
     /// # 返回值
     /// 如果交易仅包含系统程序或Memo程序指令则返回true，否则返回false
     pub fn is_simple_transfer(&self, tx: &Transaction) -> bool {
@@ -92,11 +92,11 @@ impl MevDetector {
     }
 
     /// 检查目标交易前后交易中是否有Jito小费地址，并返回小费交易的详细信息
-    /// 
+    ///
     /// # 参数
     /// * `block_transactions` - 区块中的所有交易
     /// * `target_index` - 目标交易在区块中的索引
-    /// 
+    ///
     /// # 返回值
     /// 返回包含以下信息的元组，如果没有找到Jito小费则返回None:
     /// * 小费交易索引
@@ -190,7 +190,7 @@ impl MevDetector {
     /// 解析转账指令数据中的金额
     fn parse_transfer_amount(&self, instruction_data: &str) -> Option<u64> {
         let data = bs58::decode(instruction_data).into_vec().ok()?;
-        
+
         let amount = match data.len() {
             12 if data.get(0..4)? == [2, 0, 0, 0] => {
                 // 标准系统程序转账格式
@@ -204,9 +204,7 @@ impl MevDetector {
                 // 尝试从数据中提取金额
                 u64::from_le_bytes(data.get(4..12)?.try_into().ok()?)
             }
-            len if len >= 8 => {
-                u64::from_le_bytes(data.get(0..8)?.try_into().ok()?)
-            }
+            len if len >= 8 => u64::from_le_bytes(data.get(0..8)?.try_into().ok()?),
             _ => return None,
         };
 
@@ -218,11 +216,11 @@ impl MevDetector {
     }
 
     /// 检测交易列表中是否存在三明治攻击 - 基于账户交集分析
-    /// 
+    ///
     /// # 参数
     /// * `transactions` - 交易列表（通常是Jito捆绑包中的交易）
     /// * `target_signature` - 目标交易的签名
-    /// 
+    ///
     /// # 返回值
     /// 如果检测到三明治攻击，返回包含攻击详情和损失估算的结构体，否则返回None
     pub fn detect_sandwich_attack(
@@ -247,7 +245,7 @@ impl MevDetector {
         }
 
         debug!("目标交易过滤后账户数量: {}", target_accounts.len());
-        
+
         // 寻找前两个交易中与目标交易有账户交集的交易
         let mut front_candidates = Vec::new();
         for i in 0..target_index.min(2) {
@@ -255,13 +253,13 @@ impl MevDetector {
             if !self.is_dex_transaction(front_tx) {
                 continue;
             }
-            
+
             let front_accounts = self.extract_filtered_accounts(front_tx);
             let front_intersection: Vec<String> = target_accounts
                 .intersection(&front_accounts)
                 .cloned()
                 .collect();
-                
+
             if !front_intersection.is_empty() {
                 front_candidates.push((front_tx, front_intersection));
             }
@@ -274,13 +272,13 @@ impl MevDetector {
             if !self.is_dex_transaction(back_tx) {
                 continue;
             }
-            
+
             let back_accounts = self.extract_filtered_accounts(back_tx);
             let back_intersection: Vec<String> = target_accounts
                 .intersection(&back_accounts)
                 .cloned()
                 .collect();
-                
+
             if !back_intersection.is_empty() {
                 back_candidates.push((back_tx, back_intersection));
             }
@@ -290,14 +288,16 @@ impl MevDetector {
         for (front_tx, front_intersection) in &front_candidates {
             for (back_tx, back_intersection) in &back_candidates {
                 // 检查前后交易的账户交集是否相当（表示与同一个池子交互）
-                let intersection_similarity = self.calculate_intersection_similarity(
-                    front_intersection, 
-                    back_intersection
-                );
-                
-                if intersection_similarity >= 0.7 { // 70%以上相似度认为是同一个池子
-                    info!("检测到三明治攻击模式，交集相似度: {:.1}%", intersection_similarity * 100.0);
-                    
+                let intersection_similarity =
+                    self.calculate_intersection_similarity(front_intersection, back_intersection);
+
+                if intersection_similarity >= 0.7 {
+                    // 70%以上相似度认为是同一个池子
+                    info!(
+                        "检测到三明治攻击模式，交集相似度: {:.1}%",
+                        intersection_similarity * 100.0
+                    );
+
                     // 合并前后交易的账户交集作为最终交集
                     let mut combined_intersection = front_intersection.clone();
                     for account in back_intersection {
@@ -305,16 +305,16 @@ impl MevDetector {
                             combined_intersection.push(account.clone());
                         }
                     }
-                    
+
                     // 计算用户损失
                     let user_loss = self.calculate_sandwich_loss(
-                        transactions, 
-                        target_index, 
-                        &front_tx.signature, 
+                        transactions,
+                        target_index,
+                        &front_tx.signature,
                         &back_tx.signature,
-                        &combined_intersection
+                        &combined_intersection,
                     );
-                    
+
                     return Some(SandwichDetails {
                         front_tx: front_tx.signature.clone(),
                         back_tx: back_tx.signature.clone(),
@@ -329,11 +329,11 @@ impl MevDetector {
     }
 
     /// 检测交易列表中是否存在抢跑攻击 - 基于账户交集分析
-    /// 
+    ///
     /// # 参数
     /// * `transactions` - 交易列表（通常是Jito捆绑包中的交易）
     /// * `target_signature` - 目标交易的签名
-    /// 
+    ///
     /// # 返回值
     /// 如果检测到抢跑攻击，返回包含攻击详情的结构体，否则返回None
     pub fn detect_frontrun_attack(
@@ -357,7 +357,10 @@ impl MevDetector {
             return None;
         }
 
-        debug!("抢跑检测 - 目标交易过滤后账户数量: {}", target_accounts.len());
+        debug!(
+            "抢跑检测 - 目标交易过滤后账户数量: {}",
+            target_accounts.len()
+        );
 
         // 在目标交易前面的几个交易中寻找抢跑攻击
         for i in (0..target_index).rev() {
@@ -370,7 +373,7 @@ impl MevDetector {
 
             // 获取潜在抢跑交易的过滤后账户
             let frontrun_accounts = self.extract_filtered_accounts(potential_frontrun);
-            
+
             // 计算账户交集
             let intersection: Vec<String> = target_accounts
                 .intersection(&frontrun_accounts)
@@ -380,7 +383,7 @@ impl MevDetector {
             // 如果存在账户交集，则判定为抢跑攻击
             if !intersection.is_empty() {
                 info!("检测到抢跑攻击模式，共享账户数: {}", intersection.len());
-                
+
                 return Some(FrontrunDetails {
                     front_tx: potential_frontrun.signature.clone(),
                     victim_tx: target_tx.signature.clone(),
@@ -407,23 +410,28 @@ impl MevDetector {
             {
                 // 对于系统程序指令，检查是否为小额转账
                 if program_id == SYSTEM {
-                    if self.is_small_transfer_instruction(instruction, &tx.transaction.message.account_keys) {
+                    if self.is_small_transfer_instruction(
+                        instruction,
+                        &tx.transaction.message.account_keys,
+                    ) {
                         continue; // 跳过小额转账账户
                     }
                 }
 
                 for &acc_index in &instruction.accounts {
-                    if let Some(account) = tx.transaction.message.account_keys.get(acc_index as usize) {
+                    if let Some(account) =
+                        tx.transaction.message.account_keys.get(acc_index as usize)
+                    {
                         // 检查账户是否可写
                         if !self.is_account_writable(acc_index as usize, &tx.transaction.message) {
                             continue; // 跳过只读账户
                         }
-                        
+
                         // 排除Jito小费账户
                         if JITO_TIP_ACCOUNTS.contains(&account.as_str()) {
                             continue;
                         }
-                        
+
                         filtered_accounts.insert(account.clone());
                     }
                 }
@@ -447,20 +455,21 @@ impl MevDetector {
             let num_required_signatures = header.num_required_signatures as usize;
             let num_readonly_signed_accounts = header.num_readonly_signed_accounts as usize;
             let num_readonly_unsigned_accounts = header.num_readonly_unsigned_accounts as usize;
-            
+
             // Solana账户排序：
             // 1. 需要签名的可写账户 (0 to num_required_signatures - num_readonly_signed_accounts - 1)
             // 2. 需要签名的只读账户 (num_required_signatures - num_readonly_signed_accounts to num_required_signatures - 1)
             // 3. 不需要签名的可写账户 (num_required_signatures to account_keys.len() - num_readonly_unsigned_accounts - 1)
             // 4. 不需要签名的只读账户 (account_keys.len() - num_readonly_unsigned_accounts to account_keys.len() - 1)
-            
+
             if account_index < num_required_signatures {
                 // 需要签名的账户
                 account_index < (num_required_signatures - num_readonly_signed_accounts)
             } else {
                 // 不需要签名的账户
                 let unsigned_start = num_required_signatures;
-                let readonly_unsigned_start = message.account_keys.len() - num_readonly_unsigned_accounts;
+                let readonly_unsigned_start =
+                    message.account_keys.len() - num_readonly_unsigned_accounts;
                 account_index >= unsigned_start && account_index < readonly_unsigned_start
             }
         } else {
@@ -470,7 +479,11 @@ impl MevDetector {
     }
 
     /// 检查指令是否为小额转账（小于0.001 SOL）
-    fn is_small_transfer_instruction(&self, instruction: &crate::client::Instruction, account_keys: &[String]) -> bool {
+    fn is_small_transfer_instruction(
+        &self,
+        instruction: &crate::client::Instruction,
+        account_keys: &[String],
+    ) -> bool {
         // 只检查系统程序转账指令
         if let Some(program_id) = account_keys.get(instruction.program_id_index as usize) {
             if program_id != SYSTEM {
@@ -506,17 +519,17 @@ impl MevDetector {
         if set1.is_empty() && set2.is_empty() {
             return 1.0;
         }
-        
+
         if set1.is_empty() || set2.is_empty() {
             return 0.0;
         }
 
         let set1_hash: HashSet<&String> = set1.iter().collect();
         let set2_hash: HashSet<&String> = set2.iter().collect();
-        
+
         let intersection_count = set1_hash.intersection(&set2_hash).count();
         let union_count = set1_hash.union(&set2_hash).count();
-        
+
         if union_count == 0 {
             0.0
         } else {
@@ -538,7 +551,12 @@ impl MevDetector {
         ];
 
         let has_known_dex = tx.transaction.message.instructions.iter().any(|inst| {
-            if let Some(program_id) = tx.transaction.message.account_keys.get(inst.program_id_index as usize) {
+            if let Some(program_id) = tx
+                .transaction
+                .message
+                .account_keys
+                .get(inst.program_id_index as usize)
+            {
                 DEX_PROGRAMS.contains(&program_id.as_str())
             } else {
                 false
@@ -568,7 +586,12 @@ impl MevDetector {
 
         // 检查是否有非系统程序的指令
         let has_non_system_instructions = tx.transaction.message.instructions.iter().any(|inst| {
-            if let Some(program_id) = tx.transaction.message.account_keys.get(inst.program_id_index as usize) {
+            if let Some(program_id) = tx
+                .transaction
+                .message
+                .account_keys
+                .get(inst.program_id_index as usize)
+            {
                 program_id != SYSTEM && program_id != MEMO
             } else {
                 false
@@ -607,36 +630,42 @@ impl MevDetector {
         shared_accounts: &[String],
     ) -> Option<UserLoss> {
         debug!("开始计算三明治攻击损失");
-        
+
         // 获取三笔交易
         let target_tx = &transactions[target_index];
-        let front_tx = transactions.iter().find(|tx| tx.signature == front_tx_sig)?;
+        let front_tx = transactions
+            .iter()
+            .find(|tx| tx.signature == front_tx_sig)?;
         let back_tx = transactions.iter().find(|tx| tx.signature == back_tx_sig)?;
-        
+
         // 方法1: 价格影响分析法 (最准确)
-        if let Some(loss) = self.analyze_price_impact_loss(front_tx, target_tx, back_tx, shared_accounts) {
+        if let Some(loss) =
+            self.analyze_price_impact_loss(front_tx, target_tx, back_tx, shared_accounts)
+        {
             debug!("使用价格影响分析法计算损失");
             return Some(loss);
         }
-        
+
         // 方法2: Token余额变化分析法
-        if let Some(loss) = self.analyze_token_balance_changes(front_tx, target_tx, back_tx, shared_accounts) {
+        if let Some(loss) =
+            self.analyze_token_balance_changes(front_tx, target_tx, back_tx, shared_accounts)
+        {
             debug!("使用Token余额变化分析法计算损失");
             return Some(loss);
         }
-        
+
         // 方法3: 分析攻击者的SOL余额变化 (兜底方法)
         if let Some(loss) = self.analyze_sol_balance_changes(front_tx, target_tx, back_tx) {
             debug!("使用SOL余额变化分析法计算损失");
             return Some(loss);
         }
-        
+
         // 方法4: 滑点估算法 (基于交易规模)
         let slippage_loss = self.estimate_slippage_loss(target_tx, shared_accounts);
         debug!("使用滑点估算法计算损失");
         Some(slippage_loss)
     }
-    
+
     /// 方法1: 价格影响分析法 - 通过分析池子状态变化计算损失
     fn analyze_price_impact_loss(
         &self,
@@ -648,29 +677,30 @@ impl MevDetector {
         if shared_accounts.is_empty() {
             return None;
         }
-        
+
         // 分析用户交易的规模
         let user_trade_size = self.estimate_trade_size(target_tx);
         if user_trade_size == 0 {
             return None;
         }
-        
+
         // 计算攻击者通过前后交易造成的价格影响
         let front_impact = self.estimate_trade_size(front_tx);
         let back_impact = self.estimate_trade_size(back_tx);
-        
+
         if front_impact > 0 && back_impact > 0 {
             // 计算由于价格影响导致的用户损失
             // 损失 = 用户交易规模 × 价格影响百分比
-            let price_impact_ratio = (front_impact as f64 / (front_impact + user_trade_size) as f64) * 0.01;
+            let price_impact_ratio =
+                (front_impact as f64 / (front_impact + user_trade_size) as f64) * 0.01;
             let estimated_loss = (user_trade_size as f64 * price_impact_ratio) as u64;
-            
+
             // 计算MEV攻击者的净利润
             let mev_profit = back_impact.saturating_sub(front_impact);
-            
+
             if estimated_loss > 0 {
                 let loss_percentage = (estimated_loss as f64 / user_trade_size as f64) * 100.0;
-                
+
                 return Some(UserLoss {
                     estimated_loss_lamports: estimated_loss,
                     loss_percentage: loss_percentage.min(10.0), // 限制最大10%
@@ -679,10 +709,10 @@ impl MevDetector {
                 });
             }
         }
-        
+
         None
     }
-    
+
     /// 方法2: Token余额变化分析法 - 分析用户实际损失的token数量
     fn analyze_token_balance_changes(
         &self,
@@ -696,27 +726,29 @@ impl MevDetector {
         if user_trade_size == 0 {
             return None;
         }
-        
+
         // 分析共享账户数量 - 更多共享账户表示更大的市场影响
         let market_impact_factor = (shared_accounts.len() as f64).sqrt();
-        
+
         // 计算攻击者的交易规模
         let attacker_front_size = self.estimate_trade_size(front_tx);
         let attacker_back_size = self.estimate_trade_size(back_tx);
-        
+
         if attacker_front_size > 0 && attacker_back_size > 0 {
             // 计算相对交易规模影响
-            let relative_impact = attacker_front_size as f64 / (attacker_front_size + user_trade_size) as f64;
-            
+            let relative_impact =
+                attacker_front_size as f64 / (attacker_front_size + user_trade_size) as f64;
+
             // 估算用户损失 = 交易规模 × 相对影响 × 市场影响因子
-            let estimated_loss = (user_trade_size as f64 * relative_impact * market_impact_factor * 0.005) as u64;
-            
+            let estimated_loss =
+                (user_trade_size as f64 * relative_impact * market_impact_factor * 0.005) as u64;
+
             // MEV攻击者利润估算
             let mev_profit = (attacker_back_size as f64 * 0.8) as u64;
-            
+
             if estimated_loss > 0 {
                 let loss_percentage = (estimated_loss as f64 / user_trade_size as f64) * 100.0;
-                
+
                 return Some(UserLoss {
                     estimated_loss_lamports: estimated_loss,
                     loss_percentage: loss_percentage.min(5.0), // 限制最大5%
@@ -725,10 +757,10 @@ impl MevDetector {
                 });
             }
         }
-        
+
         None
     }
-    
+
     /// 方法4: 滑点估算法 - 基于交易规模和市场深度
     fn estimate_slippage_loss(
         &self,
@@ -737,20 +769,20 @@ impl MevDetector {
     ) -> UserLoss {
         let user_trade_size = self.estimate_trade_size(target_tx);
         let instruction_count = target_tx.transaction.message.instructions.len();
-        
+
         // 基础滑点估算: 0.1% - 2%
         let base_slippage = 0.001; // 0.1%
-        
+
         // 根据共享账户数量调整 (更多共享账户意味着更复杂的交易)
         let complexity_factor = 1.0 + (shared_accounts.len() as f64 * 0.2);
-        
+
         // 根据指令数量调整
         let instruction_factor = 1.0 + (instruction_count as f64 * 0.1);
-        
+
         // 计算最终滑点
         let final_slippage = base_slippage * complexity_factor * instruction_factor;
         let estimated_loss = (user_trade_size as f64 * final_slippage) as u64;
-        
+
         UserLoss {
             estimated_loss_lamports: estimated_loss,
             loss_percentage: (final_slippage * 100.0).min(3.0), // 限制最大3%
@@ -758,28 +790,28 @@ impl MevDetector {
             mev_profit_lamports: estimated_loss, // 假设MEV利润等于用户损失
         }
     }
-    
+
     /// 估算交易规模 (基于指令数据和账户数量)
     fn estimate_trade_size(&self, tx: &Transaction) -> u64 {
         let mut total_size = 0u64;
-        
+
         // 方法1: 通过SOL转账金额估算
         let sol_amount = self.extract_sol_transfer_amount(tx);
         if sol_amount > SMALL_TRANSFER_THRESHOLD {
             total_size += sol_amount;
         }
-        
+
         // 方法2: 通过指令复杂度估算
         let instruction_complexity = tx.transaction.message.instructions.len() * 100_000_000; // 0.1 SOL per instruction
         total_size += instruction_complexity as u64;
-        
+
         // 方法3: 通过账户数量估算 (更多账户通常意味着更大的交易)
         let account_factor = tx.transaction.message.account_keys.len() * 50_000_000; // 0.05 SOL per account
         total_size += account_factor as u64;
-        
+
         total_size.max(100_000_000) // 最少估算为0.1 SOL
     }
-    
+
     /// 分析SOL余额变化来估算损失 (兜底方法)
     fn analyze_sol_balance_changes(
         &self,
@@ -788,29 +820,52 @@ impl MevDetector {
         back_tx: &Transaction,
     ) -> Option<UserLoss> {
         // 查找攻击者账户 (在前后交易中都出现的签名账户)
-        let front_signers: HashSet<&String> = front_tx.transaction.message.account_keys
-            .iter().take(front_tx.transaction.message.header.as_ref()?.num_required_signatures as usize)
+        let front_signers: HashSet<&String> = front_tx
+            .transaction
+            .message
+            .account_keys
+            .iter()
+            .take(
+                front_tx
+                    .transaction
+                    .message
+                    .header
+                    .as_ref()?
+                    .num_required_signatures as usize,
+            )
             .collect();
-        let back_signers: HashSet<&String> = back_tx.transaction.message.account_keys
-            .iter().take(back_tx.transaction.message.header.as_ref()?.num_required_signatures as usize)
+        let back_signers: HashSet<&String> = back_tx
+            .transaction
+            .message
+            .account_keys
+            .iter()
+            .take(
+                back_tx
+                    .transaction
+                    .message
+                    .header
+                    .as_ref()?
+                    .num_required_signatures as usize,
+            )
             .collect();
-        
+
         // 找到共同的签名者 (可能是攻击者)
-        let common_signers: Vec<&String> = front_signers.intersection(&back_signers).cloned().collect();
-        
+        let common_signers: Vec<&String> =
+            front_signers.intersection(&back_signers).cloned().collect();
+
         if !common_signers.is_empty() {
             // 分析前后交易中的SOL转账金额
             let front_sol_amount = self.extract_sol_transfer_amount(front_tx);
             let back_sol_amount = self.extract_sol_transfer_amount(back_tx);
             let target_sol_amount = self.extract_sol_transfer_amount(target_tx);
-            
+
             debug!("前置交易SOL转账: {} lamports", front_sol_amount);
             debug!("目标交易SOL转账: {} lamports", target_sol_amount);
             debug!("后置交易SOL转账: {} lamports", back_sol_amount);
-            
+
             // 估算MEV利润 = 后置交易收益 - 前置交易成本
             let mev_profit = back_sol_amount.saturating_sub(front_sol_amount);
-            
+
             if mev_profit > 0 {
                 // 改进的损失计算：基于交易规模的比例
                 let user_trade_size = target_sol_amount.max(self.estimate_trade_size(target_tx));
@@ -822,13 +877,13 @@ impl MevDetector {
                 } else {
                     (mev_profit as f64 * 0.3) as u64 // 保守估算30%
                 };
-                
+
                 let loss_percentage = if user_trade_size > 0 {
                     (estimated_loss as f64 / user_trade_size as f64) * 100.0
                 } else {
                     1.0 // 默认1%
                 };
-                
+
                 return Some(UserLoss {
                     estimated_loss_lamports: estimated_loss,
                     loss_percentage: loss_percentage.min(8.0), // 限制最大8%
@@ -837,17 +892,22 @@ impl MevDetector {
                 });
             }
         }
-        
+
         None
     }
-    
+
     /// 提取交易中的SOL转账金额
     fn extract_sol_transfer_amount(&self, tx: &Transaction) -> u64 {
         let mut total_amount = 0u64;
-        
+
         for instruction in &tx.transaction.message.instructions {
             // 检查是否为系统程序转账指令
-            if let Some(program_id) = tx.transaction.message.account_keys.get(instruction.program_id_index as usize) {
+            if let Some(program_id) = tx
+                .transaction
+                .message
+                .account_keys
+                .get(instruction.program_id_index as usize)
+            {
                 if program_id == SYSTEM {
                     if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
                         let amount = if data.len() == 12 && data[0..4] == [2, 0, 0, 0] {
@@ -862,7 +922,7 @@ impl MevDetector {
                         } else {
                             0
                         };
-                        
+
                         if amount > SMALL_TRANSFER_THRESHOLD {
                             total_amount += amount;
                         }
@@ -870,7 +930,7 @@ impl MevDetector {
                 }
             }
         }
-        
+
         total_amount
     }
 }

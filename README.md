@@ -65,7 +65,7 @@
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # 克隆项目
-git clone https://github.com/your-repo/solana-mev-detector.git
+git clone https://github.com/Tao-2022/solana-jito-mev-detector.git
 cd solana-mev-detector
 ```
 

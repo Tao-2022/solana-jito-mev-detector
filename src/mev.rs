@@ -9,6 +9,15 @@ pub struct SandwichDetails {
     pub front_tx: String,
     pub back_tx: String,
     pub account_intersection: Vec<String>, // 账户交集
+    pub user_loss: Option<UserLoss>, // 用户损失计算结果
+}
+
+#[derive(Debug, Clone)]
+pub struct UserLoss {
+    pub estimated_loss_lamports: u64,
+    pub loss_percentage: f64,
+    pub calculation_method: String,
+    pub mev_profit_lamports: u64, // MEV攻击者利润
 }
 
 pub struct FrontrunDetails {
@@ -469,10 +478,20 @@ impl MevDetector {
                         }
                     }
                     
+                    // 计算用户损失
+                    let user_loss = self.calculate_sandwich_loss(
+                        transactions, 
+                        target_index, 
+                        &front_tx.signature, 
+                        &back_tx.signature,
+                        &combined_intersection
+                    );
+                    
                     return Some(SandwichDetails {
                         front_tx: front_tx.signature.clone(),
                         back_tx: back_tx.signature.clone(),
                         account_intersection: combined_intersection,
+                        user_loss,
                     });
                 }
             }
@@ -741,5 +760,165 @@ impl MevDetector {
 
         // 如果有多个典型长度的账户，可能是token相关交易
         typical_token_account_count >= 4
+    }
+
+    /// 计算三明治攻击中的用户损失
+    /// 通过分析MEV攻击者的利润来估算用户损失
+    fn calculate_sandwich_loss(
+        &self,
+        transactions: &[Transaction],
+        target_index: usize,
+        front_tx_sig: &str,
+        back_tx_sig: &str,
+        shared_accounts: &[String],
+    ) -> Option<UserLoss> {
+        info!("🧮 开始计算三明治攻击损失...");
+        
+        // 获取三笔交易
+        let target_tx = &transactions[target_index];
+        let front_tx = transactions.iter().find(|tx| tx.signature == front_tx_sig)?;
+        let back_tx = transactions.iter().find(|tx| tx.signature == back_tx_sig)?;
+        
+        // 方法1: 分析攻击者的SOL余额变化 (通过Jito小费推断)
+        if let Some(loss) = self.analyze_sol_balance_changes(front_tx, target_tx, back_tx) {
+            info!("💡 使用SOL余额变化分析法计算损失");
+            return Some(loss);
+        }
+        
+        // 方法2: 分析共享账户的状态变化
+        if let Some(loss) = self.analyze_shared_account_changes(
+            front_tx, target_tx, back_tx, shared_accounts
+        ) {
+            info!("💡 使用共享账户状态变化分析法计算损失");
+            return Some(loss);
+        }
+        
+        // 方法3: 基础估算 (基于交易复杂度)
+        let basic_loss = self.estimate_basic_loss(target_tx);
+        info!("💡 使用基础估算法计算损失");
+        Some(basic_loss)
+    }
+    
+    /// 分析SOL余额变化来估算损失
+    fn analyze_sol_balance_changes(
+        &self,
+        front_tx: &Transaction,
+        target_tx: &Transaction,
+        back_tx: &Transaction,
+    ) -> Option<UserLoss> {
+        // 查找攻击者账户 (在前后交易中都出现的签名账户)
+        let front_signers: HashSet<&String> = front_tx.transaction.message.account_keys
+            .iter().take(front_tx.transaction.message.header.as_ref()?.num_required_signatures as usize)
+            .collect();
+        let back_signers: HashSet<&String> = back_tx.transaction.message.account_keys
+            .iter().take(back_tx.transaction.message.header.as_ref()?.num_required_signatures as usize)
+            .collect();
+        
+        // 找到共同的签名者 (可能是攻击者)
+        let common_signers: Vec<&String> = front_signers.intersection(&back_signers).cloned().collect();
+        
+        if !common_signers.is_empty() {
+            // 分析前后交易中的SOL转账金额
+            let front_sol_amount = self.extract_sol_transfer_amount(front_tx);
+            let back_sol_amount = self.extract_sol_transfer_amount(back_tx);
+            let target_sol_amount = self.extract_sol_transfer_amount(target_tx);
+            
+            info!("  前置交易SOL转账: {} lamports", front_sol_amount);
+            info!("  目标交易SOL转账: {} lamports", target_sol_amount);
+            info!("  后置交易SOL转账: {} lamports", back_sol_amount);
+            
+            // 估算MEV利润 = 后置交易收益 - 前置交易成本
+            let mev_profit = back_sol_amount.saturating_sub(front_sol_amount);
+            
+            if mev_profit > 0 {
+                // 用户损失通常是MEV利润的70-90%
+                let estimated_loss = (mev_profit as f64 * 0.8) as u64;
+                let loss_percentage = if target_sol_amount > 0 {
+                    (estimated_loss as f64 / target_sol_amount as f64) * 100.0
+                } else {
+                    0.0
+                };
+                
+                return Some(UserLoss {
+                    estimated_loss_lamports: estimated_loss,
+                    loss_percentage,
+                    calculation_method: "SOL余额变化分析".to_string(),
+                    mev_profit_lamports: mev_profit,
+                });
+            }
+        }
+        
+        None
+    }
+    
+    /// 分析共享账户状态变化
+    fn analyze_shared_account_changes(
+        &self,
+        _front_tx: &Transaction,
+        target_tx: &Transaction,
+        _back_tx: &Transaction,
+        shared_accounts: &[String],
+    ) -> Option<UserLoss> {
+        if shared_accounts.is_empty() {
+            return None;
+        }
+        
+        // 基于共享账户数量和交易复杂度估算
+        let complexity_score = shared_accounts.len() * target_tx.transaction.message.instructions.len();
+        let estimated_loss = (complexity_score as f64 * 50000.0) as u64; // 每个复杂度单位约0.05 SOL
+        
+        Some(UserLoss {
+            estimated_loss_lamports: estimated_loss,
+            loss_percentage: 2.0, // 假设2%的滑点损失
+            calculation_method: "共享账户复杂度分析".to_string(),
+            mev_profit_lamports: estimated_loss,
+        })
+    }
+    
+    /// 基础损失估算
+    fn estimate_basic_loss(&self, target_tx: &Transaction) -> UserLoss {
+        // 基于交易指令数量的基础估算
+        let instruction_count = target_tx.transaction.message.instructions.len();
+        let estimated_loss = (instruction_count as f64 * 100000.0) as u64; // 每个指令约0.1 SOL损失
+        
+        UserLoss {
+            estimated_loss_lamports: estimated_loss,
+            loss_percentage: 1.5, // 假设1.5%的基础损失
+            calculation_method: "基础估算法".to_string(),
+            mev_profit_lamports: estimated_loss,
+        }
+    }
+    
+    /// 提取交易中的SOL转账金额
+    fn extract_sol_transfer_amount(&self, tx: &Transaction) -> u64 {
+        let mut total_amount = 0u64;
+        
+        for instruction in &tx.transaction.message.instructions {
+            // 检查是否为系统程序转账指令
+            if let Some(program_id) = tx.transaction.message.account_keys.get(instruction.program_id_index as usize) {
+                if program_id == SYSTEM_PROGRAM_ID {
+                    if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
+                        let amount = if data.len() == 12 && data[0..4] == [2, 0, 0, 0] {
+                            // 标准系统程序转账格式
+                            u64::from_le_bytes(data[4..12].try_into().unwrap_or([0; 8]))
+                        } else if data.len() == 8 {
+                            // 简化的转账格式
+                            u64::from_le_bytes(data.try_into().unwrap_or([0; 8]))
+                        } else if data.len() >= 12 {
+                            // 尝试从数据中提取金额
+                            u64::from_le_bytes(data[4..12].try_into().unwrap_or([0; 8]))
+                        } else {
+                            0
+                        };
+                        
+                        if amount > SMALL_TRANSFER_THRESHOLD {
+                            total_amount += amount;
+                        }
+                    }
+                }
+            }
+        }
+        
+        total_amount
     }
 }

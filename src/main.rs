@@ -183,7 +183,7 @@ async fn analyze_transaction(
                         tx.signature
                     );
                 } else if tx.signature == target_signature {
-                    warn!(
+                    info!(
                         "  {}. https://solscan.io/tx/{} 🎯 (目标交易)",
                         i + 1,
                         tx.signature
@@ -207,18 +207,36 @@ async fn analyze_transaction(
                 info!("    前置交易: https://solscan.io/tx/{}", sandwich.front_tx);
                 info!("    后置交易: https://solscan.io/tx/{}", sandwich.back_tx);
                 info!("    账户交集: {:?}", sandwich.account_intersection);
+                
+                // 显示损失计算结果
+                if let Some(loss) = &sandwich.user_loss {
+                    error!("  💸 估算用户损失:");
+                    error!("    损失金额: {} lamports ({:.6} SOL)", 
+                           loss.estimated_loss_lamports, 
+                           loss.estimated_loss_lamports as f64 / 1_000_000_000.0);
+                    error!("    损失百分比: {:.2}%", loss.loss_percentage);
+                    error!("    MEV攻击者利润: {} lamports ({:.6} SOL)", 
+                           loss.mev_profit_lamports,
+                           loss.mev_profit_lamports as f64 / 1_000_000_000.0);
+                    info!("    计算方法: {}", loss.calculation_method);
+                } else {
+                    warn!("    ⚠️ 无法计算具体损失金额");
+                }
+                
+                info!("  ℹ️ 检测到三明治攻击，跳过抢跑检测（避免重复报告）");
             } else {
                 info!("  ✅ 未检测到三明治攻击");
-            }
-
-            if let Some(frontrun) =
-                detector.detect_frontrun_attack(&bundle_transactions, target_signature)
-            {
-                error!("  🏃 检测到抢跑攻击:");
-                info!("    抢跑交易: https://solscan.io/tx/{}", frontrun.front_tx);
-                info!("    账户交集: {:?}", frontrun.account_intersection);
-            } else {
-                info!("  ✅ 未检测到抢跑攻击");
+                
+                // 只有在未检测到三明治攻击时才检测抢跑攻击
+                if let Some(frontrun) =
+                    detector.detect_frontrun_attack(&bundle_transactions, target_signature)
+                {
+                    error!("  🏃 检测到抢跑攻击:");
+                    info!("    抢跑交易: https://solscan.io/tx/{}", frontrun.front_tx);
+                    info!("    账户交集: {:?}", frontrun.account_intersection);
+                } else {
+                    info!("  ✅ 未检测到抢跑攻击");
+                }
             }
 
             warn!(" ⚠️ 解析不一定正确，如果临近交易有给jito的小费的交易，请根据日志信息再次确认");

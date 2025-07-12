@@ -8,12 +8,13 @@ pub struct MevDetector;
 pub struct SandwichDetails {
     pub front_tx: String,
     pub back_tx: String,
-    pub victim_loss_estimate: f64, // 用户损失估算
+    pub account_intersection: Vec<String>, // 账户交集
 }
 
 pub struct FrontrunDetails {
     pub front_tx: String,
     pub victim_tx: String,
+    pub account_intersection: Vec<String>, // 账户交集
 }
 
 // 主要 DEX 程序 ID
@@ -25,10 +26,8 @@ const SERUM_DEX_PROGRAM_ID: &str = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin
 const JUPITER_PROGRAM_ID: &str = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
 const PUMP_FUN_PROGRAM_ID: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 
-// 三明治攻击检测相关常量
-const MIN_SHARED_ACCOUNTS: usize = 3;
-const MAX_PRICE_IMPACT_THRESHOLD: f64 = 0.05; // 5%价格影响阈值
-const MIN_LOSS_THRESHOLD: f64 = 0.001; // 最小损失阈值 (SOL)
+// 小额转账阈值 (0.001 SOL = 1,000,000 lamports)
+const SMALL_TRANSFER_THRESHOLD: u64 = 1_000_000;
 const JITO_TIP_ACCOUNTS: [&str; 8] = [
     "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
     "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
@@ -323,7 +322,7 @@ impl MevDetector {
         None
     }
 
-    /// 检测交易列表中是否存在三明治攻击 - 基于账户比较的改进版本
+    /// 检测交易列表中是否存在三明治攻击 - 基于账户交集分析
     pub fn detect_sandwich_attack(
         &self,
         transactions: &[Transaction],
@@ -334,59 +333,141 @@ impl MevDetector {
             .position(|tx| tx.signature == target_signature)?;
         let target_tx = &transactions[target_index];
 
-        // 检查目标交易是否是交易类型（使用更宽松的检测）
+        // 检查目标交易是否是DEX交易类型
         if !self.is_dex_transaction(target_tx) {
             return None;
         }
 
-        // 获取目标交易的代币账户信息
-        let target_accounts = self.extract_all_accounts(target_tx);
-        if target_accounts.len() < 4 {
-            // 降低最小账户要求
+        // 获取目标交易的过滤后账户（排除系统账户、Jito小费账户、小额转账账户）
+        let target_accounts = self.extract_filtered_accounts(target_tx);
+        if target_accounts.is_empty() {
             return None;
         }
 
-        // 在目标交易前后寻找潜在的三明治攻击
-        for front_idx in 0..target_index {
-            for back_idx in (target_index + 1)..transactions.len() {
-                let front_tx = &transactions[front_idx];
-                let back_tx = &transactions[back_idx];
+        info!("🎯 目标交易过滤后账户数量: {}", target_accounts.len());
+        
+        // 寻找前两个交易中与目标交易有账户交集的交易
+        let mut front_candidates = Vec::new();
+        for i in 0..target_index.min(2) {
+            let front_tx = &transactions[target_index.saturating_sub(i + 1)];
+            if !self.is_dex_transaction(front_tx) {
+                continue;
+            }
+            
+            let front_accounts = self.extract_filtered_accounts(front_tx);
+            let front_intersection: Vec<String> = target_accounts
+                .intersection(&front_accounts)
+                .cloned()
+                .collect();
+                
+            if !front_intersection.is_empty() {
+                front_candidates.push((front_tx, front_intersection));
+            }
+        }
 
-                // 检查是否是同一个攻击者
-                if !self.is_same_attacker(front_tx, back_tx) {
-                    continue;
-                }
+        // 寻找后两个交易中与目标交易有账户交集的交易
+        let mut back_candidates = Vec::new();
+        for i in 0..2.min(transactions.len() - target_index - 1) {
+            let back_tx = &transactions[target_index + i + 1];
+            if !self.is_dex_transaction(back_tx) {
+                continue;
+            }
+            
+            let back_accounts = self.extract_filtered_accounts(back_tx);
+            let back_intersection: Vec<String> = target_accounts
+                .intersection(&back_accounts)
+                .cloned()
+                .collect();
+                
+            if !back_intersection.is_empty() {
+                back_candidates.push((back_tx, back_intersection));
+            }
+        }
 
-                // 检查是否都是交易类型
-                if !self.is_dex_transaction(front_tx) || !self.is_dex_transaction(back_tx) {
-                    continue;
-                }
-
-                // 使用更宽松的账户重叠检测
-                if !self.has_significant_account_overlap(front_tx, back_tx, target_tx) {
-                    continue;
-                }
-
-                // 检查时间顺序和交易模式
-                if !self.matches_sandwich_pattern(front_tx, back_tx, target_tx) {
-                    continue;
-                }
-
-                // 计算用户潜在损失
-                let victim_loss = self.calculate_victim_loss(front_tx, back_tx, target_tx);
-                if victim_loss < MIN_LOSS_THRESHOLD {
-                    continue;
-                }
-
-                info!(
-                    "检测到三明治攻击模式（基于账户分析），预估用户损失: {:.6} SOL",
-                    victim_loss
+        // 检查前后交易是否有相等的账户交集（三明治攻击特征）
+        for (front_tx, front_intersection) in &front_candidates {
+            for (back_tx, back_intersection) in &back_candidates {
+                // 检查前后交易的账户交集是否相当（表示与同一个池子交互）
+                let intersection_similarity = self.calculate_intersection_similarity(
+                    front_intersection, 
+                    back_intersection
                 );
+                
+                if intersection_similarity >= 0.7 { // 70%以上相似度认为是同一个池子
+                    info!("🥪 发现三明治攻击模式: 前后交易与目标交易有相似的账户交集");
+                    info!("  前置交易账户交集: {:?}", front_intersection);
+                    info!("  后置交易账户交集: {:?}", back_intersection);
+                    info!("  交集相似度: {:.2}%", intersection_similarity * 100.0);
+                    
+                    // 合并前后交易的账户交集作为最终交集
+                    let mut combined_intersection = front_intersection.clone();
+                    for account in back_intersection {
+                        if !combined_intersection.contains(account) {
+                            combined_intersection.push(account.clone());
+                        }
+                    }
+                    
+                    return Some(SandwichDetails {
+                        front_tx: front_tx.signature.clone(),
+                        back_tx: back_tx.signature.clone(),
+                        account_intersection: combined_intersection,
+                    });
+                }
+            }
+        }
 
-                return Some(SandwichDetails {
-                    front_tx: front_tx.signature.clone(),
-                    back_tx: back_tx.signature.clone(),
-                    victim_loss_estimate: victim_loss,
+        None
+    }
+
+    /// 检测交易列表中是否存在抢跑攻击 - 基于账户交集分析
+    pub fn detect_frontrun_attack(
+        &self,
+        transactions: &[Transaction],
+        target_signature: &str,
+    ) -> Option<FrontrunDetails> {
+        let target_index = transactions
+            .iter()
+            .position(|tx| tx.signature == target_signature)?;
+        let target_tx = &transactions[target_index];
+
+        // 检查目标交易是否是DEX交易类型
+        if !self.is_dex_transaction(target_tx) {
+            return None;
+        }
+
+        // 获取目标交易的过滤后账户
+        let target_accounts = self.extract_filtered_accounts(target_tx);
+        if target_accounts.is_empty() {
+            return None;
+        }
+
+        // 在目标交易前面的几个交易中寻找抢跑攻击
+        for i in (0..target_index).rev() {
+            let potential_frontrun = &transactions[i];
+
+            // 检查是否是DEX交易类型
+            if !self.is_dex_transaction(potential_frontrun) {
+                continue;
+            }
+
+            // 获取潜在抢跑交易的过滤后账户
+            let frontrun_accounts = self.extract_filtered_accounts(potential_frontrun);
+            
+            // 计算账户交集
+            let intersection: Vec<String> = target_accounts
+                .intersection(&frontrun_accounts)
+                .cloned()
+                .collect();
+
+            // 如果存在账户交集，则判定为抢跑攻击
+            if !intersection.is_empty() {
+                info!("🏃 发现抢跑攻击模式: 前置交易与目标交易存在账户交集");
+                info!("  账户交集: {:?}", intersection);
+                
+                return Some(FrontrunDetails {
+                    front_tx: potential_frontrun.signature.clone(),
+                    victim_tx: target_tx.signature.clone(),
+                    account_intersection: intersection,
                 });
             }
         }
@@ -394,76 +475,100 @@ impl MevDetector {
         None
     }
 
-    /// 提取交易中的所有账户（不仅仅是token账户）
-    fn extract_all_accounts(&self, tx: &Transaction) -> HashSet<String> {
-        let mut all_accounts = HashSet::new();
+    /// 提取交易中的过滤后账户（排除系统账户、Jito小费账户、小额转账账户）
+    fn extract_filtered_accounts(&self, tx: &Transaction) -> HashSet<String> {
+        let mut filtered_accounts = HashSet::new();
 
-        // 获取所有账户（包括指令中引用的账户）
+        // 获取所有非系统程序的账户
         for instruction in &tx.transaction.message.instructions {
-            for &acc_index in &instruction.accounts {
-                if let Some(account) = tx.transaction.message.account_keys.get(acc_index as usize) {
-                    all_accounts.insert(account.clone());
+            if let Some(program_id) = tx
+                .transaction
+                .message
+                .account_keys
+                .get(instruction.program_id_index as usize)
+            {
+                // 跳过系统程序指令
+                if program_id == SYSTEM_PROGRAM_ID {
+                    // 对于系统程序指令，检查是否为小额转账
+                    if self.is_small_transfer_instruction(instruction, &tx.transaction.message.account_keys) {
+                        continue; // 跳过小额转账账户
+                    }
+                }
+
+                for &acc_index in &instruction.accounts {
+                    if let Some(account) = tx.transaction.message.account_keys.get(acc_index as usize) {
+                        // 排除系统账户
+                        if account == SYSTEM_PROGRAM_ID || account == MEMO_PROGRAM_ID {
+                            continue;
+                        }
+                        
+                        // 排除Jito小费账户
+                        if JITO_TIP_ACCOUNTS.contains(&account.as_str()) {
+                            continue;
+                        }
+                        
+                        filtered_accounts.insert(account.clone());
+                    }
                 }
             }
         }
 
-        all_accounts
+        filtered_accounts
     }
 
-    /// 检查三笔交易是否有显著的账户重叠
-    fn has_significant_account_overlap(
-        &self,
-        front_tx: &Transaction,
-        back_tx: &Transaction,
-        target_tx: &Transaction,
-    ) -> bool {
-        let front_accounts = self.extract_all_accounts(front_tx);
-        let back_accounts = self.extract_all_accounts(back_tx);
-        let target_accounts = self.extract_all_accounts(target_tx);
+    /// 检查指令是否为小额转账（小于0.001 SOL）
+    fn is_small_transfer_instruction(&self, instruction: &crate::client::Instruction, account_keys: &[String]) -> bool {
+        // 只检查系统程序转账指令
+        if let Some(program_id) = account_keys.get(instruction.program_id_index as usize) {
+            if program_id != SYSTEM_PROGRAM_ID {
+                return false;
+            }
+        } else {
+            return false;
+        }
 
-        // 计算三方交易的账户重叠
-        let front_target_overlap: HashSet<_> =
-            front_accounts.intersection(&target_accounts).collect();
-        let back_target_overlap: HashSet<_> =
-            back_accounts.intersection(&target_accounts).collect();
-        let all_three_overlap: HashSet<_> = front_target_overlap
-            .intersection(&back_target_overlap)
-            .collect();
+        // 解析指令数据获取转账金额
+        if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
+            let amount = if data.len() == 12 && data[0..4] == [2, 0, 0, 0] {
+                // 标准系统程序转账格式
+                u64::from_le_bytes(data[4..12].try_into().unwrap_or([0; 8]))
+            } else if data.len() == 8 {
+                // 简化的转账格式 (只包含金额)
+                u64::from_le_bytes(data.try_into().unwrap_or([0; 8]))
+            } else if data.len() >= 12 {
+                // 尝试从数据中提取金额
+                u64::from_le_bytes(data[4..12].try_into().unwrap_or([0; 8]))
+            } else {
+                0
+            };
 
-        // 降低要求，至少有2个共同账户就可能是三明治攻击
-        let min_overlap = 2;
-
-        // 同时检查前后交易之间的账户重叠
-        let front_back_overlap: HashSet<_> = front_accounts.intersection(&back_accounts).collect();
-
-        all_three_overlap.len() >= min_overlap || front_back_overlap.len() >= min_overlap
+            amount > 0 && amount < SMALL_TRANSFER_THRESHOLD
+        } else {
+            false
+        }
     }
 
-    /// 检查是否符合三明治攻击的模式
-    fn matches_sandwich_pattern(
-        &self,
-        front_tx: &Transaction,
-        back_tx: &Transaction,
-        target_tx: &Transaction,
-    ) -> bool {
-        // 检查交易复杂度模式
-        let front_complexity = self.calculate_transaction_complexity(front_tx);
-        let back_complexity = self.calculate_transaction_complexity(back_tx);
-        let target_complexity = self.calculate_transaction_complexity(target_tx);
+    /// 计算两个账户交集的相似度
+    fn calculate_intersection_similarity(&self, set1: &[String], set2: &[String]) -> f64 {
+        if set1.is_empty() && set2.is_empty() {
+            return 1.0;
+        }
+        
+        if set1.is_empty() || set2.is_empty() {
+            return 0.0;
+        }
 
-        // 三明治攻击中，前后交易通常比目标交易更复杂
-        let complexity_pattern = (front_complexity > target_complexity * 80 / 100)
-            || (back_complexity > target_complexity * 80 / 100);
-
-        // 检查账户数量模式
-        let front_accounts = front_tx.transaction.message.account_keys.len();
-        let back_accounts = back_tx.transaction.message.account_keys.len();
-        let target_accounts = target_tx.transaction.message.account_keys.len();
-
-        // 攻击者交易通常账户数量相似
-        let similar_complexity = (front_accounts as i32 - back_accounts as i32).abs() <= 3;
-
-        complexity_pattern && similar_complexity
+        let set1_hash: HashSet<&String> = set1.iter().collect();
+        let set2_hash: HashSet<&String> = set2.iter().collect();
+        
+        let intersection_count = set1_hash.intersection(&set2_hash).count();
+        let union_count = set1_hash.union(&set2_hash).count();
+        
+        if union_count == 0 {
+            0.0
+        } else {
+            intersection_count as f64 / union_count as f64
+        }
     }
 
     /// 检查交易是否为DEX交易 - 改进版本，不仅依赖程序ID
@@ -480,12 +585,7 @@ impl MevDetector {
         ];
 
         let has_known_dex = tx.transaction.message.instructions.iter().any(|inst| {
-            if let Some(program_id) = tx
-                .transaction
-                .message
-                .account_keys
-                .get(inst.program_id_index as usize)
-            {
+            if let Some(program_id) = tx.transaction.message.account_keys.get(inst.program_id_index as usize) {
                 DEX_PROGRAMS.contains(&program_id.as_str())
             } else {
                 false
@@ -508,19 +608,14 @@ impl MevDetector {
         // 3. 不是简单的系统程序交易
 
         let account_count = tx.transaction.message.account_keys.len();
-        let instruction_count = tx.transaction.message.instructions.len();
+        let _instruction_count = tx.transaction.message.instructions.len();
 
         // swap交易通常涉及至少6个账户（用户钱包、token账户、池子账户、程序等）
         let has_multiple_accounts = account_count >= 6;
 
         // 检查是否有非系统程序的指令
         let has_non_system_instructions = tx.transaction.message.instructions.iter().any(|inst| {
-            if let Some(program_id) = tx
-                .transaction
-                .message
-                .account_keys
-                .get(inst.program_id_index as usize)
-            {
+            if let Some(program_id) = tx.transaction.message.account_keys.get(inst.program_id_index as usize) {
                 program_id != SYSTEM_PROGRAM_ID && program_id != MEMO_PROGRAM_ID
             } else {
                 false
@@ -546,253 +641,5 @@ impl MevDetector {
 
         // 如果有多个典型长度的账户，可能是token相关交易
         typical_token_account_count >= 4
-    }
-
-    /// 提取交易中涉及的代币账户
-    fn extract_token_accounts(&self, tx: &Transaction) -> HashSet<String> {
-        let mut token_accounts = HashSet::new();
-
-        // 获取所有非系统程序的账户
-        for instruction in &tx.transaction.message.instructions {
-            if let Some(program_id) = tx
-                .transaction
-                .message
-                .account_keys
-                .get(instruction.program_id_index as usize)
-            {
-                if program_id != SYSTEM_PROGRAM_ID {
-                    for &acc_index in &instruction.accounts {
-                        if let Some(account) =
-                            tx.transaction.message.account_keys.get(acc_index as usize)
-                        {
-                            token_accounts.insert(account.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        token_accounts
-    }
-
-    /// 检查三笔交易是否涉及相同的代币对
-    fn involves_same_token_pair(
-        &self,
-        front_tx: &Transaction,
-        back_tx: &Transaction,
-        target_tx: &Transaction,
-    ) -> bool {
-        let front_tokens = self.extract_token_accounts(front_tx);
-        let back_tokens = self.extract_token_accounts(back_tx);
-        let target_tokens = self.extract_token_accounts(target_tx);
-
-        // 检查三笔交易是否有足够的共同代币账户
-        let common_front_target: HashSet<_> = front_tokens.intersection(&target_tokens).collect();
-        let common_back_target: HashSet<_> = back_tokens.intersection(&target_tokens).collect();
-        let common_all: HashSet<_> = common_front_target
-            .intersection(&common_back_target)
-            .collect();
-
-        common_all.len() >= MIN_SHARED_ACCOUNTS
-    }
-
-    /// 增强版检查是否有相反操作
-    fn has_opposite_operations_enhanced(
-        &self,
-        front_tx: &Transaction,
-        back_tx: &Transaction,
-        target_tx: &Transaction,
-    ) -> bool {
-        // 获取交易的操作类型（通过指令数据的前8字节判断）
-        let get_operation_type = |tx: &Transaction| -> Option<[u8; 8]> {
-            tx.transaction
-                .message
-                .instructions
-                .first()
-                .and_then(|inst| {
-                    if let Ok(data) = bs58::decode(&inst.data).into_vec() {
-                        if data.len() >= 8 {
-                            let mut op_type = [0u8; 8];
-                            op_type.copy_from_slice(&data[0..8]);
-                            Some(op_type)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                })
-        };
-
-        let front_op = get_operation_type(front_tx);
-        let back_op = get_operation_type(back_tx);
-        let target_op = get_operation_type(target_tx);
-
-        // 检查前置和后置交易是否有不同的操作类型
-        match (front_op, back_op, target_op) {
-            (Some(front), Some(back), Some(_target)) => {
-                // 如果前置和后置操作不同，且与目标交易的操作相关，则可能是三明治攻击
-                front != back
-            }
-            _ => false,
-        }
-    }
-
-    /// 计算用户在三明治攻击中的损失
-    fn calculate_victim_loss(
-        &self,
-        front_tx: &Transaction,
-        back_tx: &Transaction,
-        target_tx: &Transaction,
-    ) -> f64 {
-        // 简化的损失计算，基于交易的复杂度和涉及的代币数量
-        // 在三明治攻击中，攻击者的利润就是用户的损失
-        let front_accounts = self.extract_token_accounts(front_tx);
-        let back_accounts = self.extract_token_accounts(back_tx);
-        let target_accounts = self.extract_token_accounts(target_tx);
-
-        let complexity_factor =
-            (front_accounts.len() + back_accounts.len() + target_accounts.len()) as f64 / 10.0;
-        let base_loss = 0.005; // 基础损失估算
-
-        // 根据交易复杂度调整损失估算
-        // 更复杂的交易通常意味着更大的滑点和损失
-        base_loss * complexity_factor.min(3.0)
-    }
-
-    /// 检测交易列表中是否存在抢跑攻击 - 基于账户比较的改进版本
-    pub fn detect_frontrun_attack(
-        &self,
-        transactions: &[Transaction],
-        target_signature: &str,
-    ) -> Option<FrontrunDetails> {
-        let target_index = transactions
-            .iter()
-            .position(|tx| tx.signature == target_signature)?;
-        let target_tx = &transactions[target_index];
-
-        // 检查目标交易是否是交易类型（使用更宽松的检测）
-        if !self.is_dex_transaction(target_tx) {
-            return None;
-        }
-
-        let target_accounts = self.extract_all_accounts(target_tx);
-        if target_accounts.len() < 4 {
-            return None;
-        }
-
-        // 在目标交易前寻找潜在的抢跑交易
-        for i in (0..target_index).rev() {
-            let potential_frontrun = &transactions[i];
-
-            // 检查是否是交易类型
-            if !self.is_dex_transaction(potential_frontrun) {
-                continue;
-            }
-
-            // 检查是否在同一个slot（时间窗口）
-            if potential_frontrun.slot != target_tx.slot {
-                continue;
-            }
-
-            // 使用账户重叠检测相同的代币对
-            if !self.has_account_overlap_for_frontrun(potential_frontrun, target_tx) {
-                continue;
-            }
-
-            // 检查是否有相似的交易模式
-            if !self.has_similar_transaction_pattern(potential_frontrun, target_tx) {
-                continue;
-            }
-
-            // 检查是否符合抢跑特征
-            if !self.matches_frontrun_characteristics(potential_frontrun, target_tx) {
-                continue;
-            }
-
-            info!("检测到抢跑攻击模式（基于账户分析），抢跑交易比目标交易优先执行");
-
-            return Some(FrontrunDetails {
-                front_tx: potential_frontrun.signature.clone(),
-                victim_tx: target_tx.signature.clone(),
-            });
-        }
-
-        None
-    }
-
-    /// 检查两笔交易是否有账户重叠（抢跑版本）
-    fn has_account_overlap_for_frontrun(&self, tx1: &Transaction, tx2: &Transaction) -> bool {
-        let accounts1 = self.extract_all_accounts(tx1);
-        let accounts2 = self.extract_all_accounts(tx2);
-
-        // 检查是否有至少2个共同的账户
-        let common_accounts: HashSet<_> = accounts1.intersection(&accounts2).collect();
-        common_accounts.len() >= 2
-    }
-
-    /// 检查是否有相似的交易模式
-    fn has_similar_transaction_pattern(&self, tx1: &Transaction, tx2: &Transaction) -> bool {
-        // 比较交易复杂度
-        let complexity1 = self.calculate_transaction_complexity(tx1);
-        let complexity2 = self.calculate_transaction_complexity(tx2);
-
-        // 抢跑交易通常复杂度相似或更高
-        let complexity_ratio = if complexity2 > 0 {
-            complexity1 as f64 / complexity2 as f64
-        } else {
-            1.0
-        };
-
-        // 复杂度比率在合理范围内
-        complexity_ratio >= 0.8 && complexity_ratio <= 2.0
-    }
-
-    /// 检查是否符合抢跑特征
-    fn matches_frontrun_characteristics(
-        &self,
-        frontrun_tx: &Transaction,
-        target_tx: &Transaction,
-    ) -> bool {
-        // 检查账户数量
-        let frontrun_accounts = frontrun_tx.transaction.message.account_keys.len();
-        let target_accounts = target_tx.transaction.message.account_keys.len();
-
-        // 检查指令数量
-        let frontrun_instructions = frontrun_tx.transaction.message.instructions.len();
-        let target_instructions = target_tx.transaction.message.instructions.len();
-
-        // 抢跑交易通常有以下特征之一：
-        // 1. 更多的账户（更复杂的路由）
-        // 2. 更多的指令（更复杂的操作）
-        // 3. 相似的账户数量但更高的复杂度
-
-        let more_accounts = frontrun_accounts > target_accounts;
-        let more_instructions = frontrun_instructions > target_instructions;
-        let similar_size_but_complex = (frontrun_accounts as i32 - target_accounts as i32).abs()
-            <= 2
-            && self.calculate_transaction_complexity(frontrun_tx)
-                > self.calculate_transaction_complexity(target_tx);
-
-        more_accounts || more_instructions || similar_size_but_complex
-    }
-
-    /// 计算交易复杂度
-    fn calculate_transaction_complexity(&self, tx: &Transaction) -> u32 {
-        let account_count = tx.transaction.message.account_keys.len() as u32;
-        let instruction_count = tx.transaction.message.instructions.len() as u32;
-        let total_data_size: u32 = tx
-            .transaction
-            .message
-            .instructions
-            .iter()
-            .map(|inst| inst.data.len() as u32)
-            .sum();
-
-        account_count + instruction_count * 2 + total_data_size / 100
-    }
-
-    fn is_same_attacker(&self, tx1: &Transaction, tx2: &Transaction) -> bool {
-        tx1.transaction.message.account_keys.first() == tx2.transaction.message.account_keys.first()
     }
 }

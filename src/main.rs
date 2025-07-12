@@ -206,7 +206,7 @@ async fn analyze_transaction(
                 error!("  🥪 检测到三明治攻击:");
                 info!("    前置交易: https://solscan.io/tx/{}", sandwich.front_tx);
                 info!("    后置交易: https://solscan.io/tx/{}", sandwich.back_tx);
-                info!("    预估用户损失: {:.6} SOL", sandwich.victim_loss_estimate);
+                info!("    账户交集: {:?}", sandwich.account_intersection);
             } else {
                 info!("  ✅ 未检测到三明治攻击");
             }
@@ -216,6 +216,7 @@ async fn analyze_transaction(
             {
                 error!("  🏃 检测到抢跑攻击:");
                 info!("    抢跑交易: https://solscan.io/tx/{}", frontrun.front_tx);
+                info!("    账户交集: {:?}", frontrun.account_intersection);
             } else {
                 info!("  ✅ 未检测到抢跑攻击");
             }

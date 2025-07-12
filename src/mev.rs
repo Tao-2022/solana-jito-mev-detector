@@ -3,40 +3,57 @@ use bs58;
 use log::{debug, info};
 use std::collections::HashSet;
 
+/// MEV检测器主结构体
 pub struct MevDetector;
 
+/// 三明治攻击检测结果
+#[derive(Debug, Clone)]
 pub struct SandwichDetails {
     pub front_tx: String,
     pub back_tx: String,
-    pub account_intersection: Vec<String>, // 账户交集
-    pub user_loss: Option<UserLoss>, // 用户损失计算结果
+    pub account_intersection: Vec<String>,
+    pub user_loss: Option<UserLoss>,
 }
 
+/// 用户损失分析结果
 #[derive(Debug, Clone)]
 pub struct UserLoss {
     pub estimated_loss_lamports: u64,
     pub loss_percentage: f64,
     pub calculation_method: String,
-    pub mev_profit_lamports: u64, // MEV攻击者利润
+    pub mev_profit_lamports: u64,
 }
 
+/// 抢跑攻击检测结果
+#[derive(Debug, Clone)]
 pub struct FrontrunDetails {
     pub front_tx: String,
     pub victim_tx: String,
-    pub account_intersection: Vec<String>, // 账户交集
+    pub account_intersection: Vec<String>,
 }
 
-// 主要 DEX 程序 ID
-const RAYDIUM_AMM_PROGRAM_ID: &str = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
-const RAYDIUM_CLMM_PROGRAM_ID: &str = "CAMMCzo5YL8w4VFF8KVHrK22GGUQzGdR1qJRXgKhpNzc";
-const ORCA_WHIRLPOOLS_PROGRAM_ID: &str = "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc";
-const ORCA_V1_PROGRAM_ID: &str = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM";
-const SERUM_DEX_PROGRAM_ID: &str = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin";
-const JUPITER_PROGRAM_ID: &str = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
-const PUMP_FUN_PROGRAM_ID: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+// 程序ID常量定义
+mod program_ids {
+    // 主要 DEX 程序 ID
+    pub const RAYDIUM_AMM: &str = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
+    pub const RAYDIUM_CLMM: &str = "CAMMCzo5YL8w4VFF8KVHrK22GGUQzGdR1qJRXgKhpNzc";
+    pub const ORCA_WHIRLPOOLS: &str = "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc";
+    pub const ORCA_V1: &str = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM";
+    pub const SERUM_DEX: &str = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin";
+    pub const JUPITER: &str = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
+    pub const PUMP_FUN: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+    
+    // 系统程序 ID
+    pub const SYSTEM: &str = "11111111111111111111111111111111";
+    pub const MEMO: &str = "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDgQdddcxFr";
+}
 
-// 小额转账阈值 (0.001 SOL = 1,000,000 lamports)
-const SMALL_TRANSFER_THRESHOLD: u64 = 1_000_000;
+use program_ids::*;
+
+// 配置常量
+const SMALL_TRANSFER_THRESHOLD: u64 = 1_000_000; // 0.001 SOL
+
+// Jito 小费账户列表
 const JITO_TIP_ACCOUNTS: [&str; 8] = [
     "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
     "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
@@ -48,49 +65,17 @@ const JITO_TIP_ACCOUNTS: [&str; 8] = [
     "GGcvCardiohRDPcsyTuyNzTTBEsszS6b6X9dCg12N66X",
 ];
 
-const SYSTEM_PROGRAM_ID: &str = "11111111111111111111111111111111";
-const MEMO_PROGRAM_ID: &str = "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDgQdddcxFr";
-const VOTE_PROGRAM_ID: &str = "Vote111111111111111111111111111111111111111";
-// 添加更多可能的投票相关程序ID
-const STAKE_PROGRAM_ID: &str = "Stake11111111111111111111111111111111111111";
-
-// SPL Token 程序
-const TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
-const ASSOCIATED_TOKEN_PROGRAM_ID: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
-
-// 常见的系统代币账户
-const WSOL_MINT: &str = "So11111111111111111111111111111111111111112"; // Wrapped SOL
-
-// Solana 核心程序
-const RENT_PROGRAM_ID: &str = "SysvarRent111111111111111111111111111111111";
-const CLOCK_PROGRAM_ID: &str = "SysvarC1ock11111111111111111111111111111111";
-const RECENT_BLOCKHASHES_PROGRAM_ID: &str = "SysvarRecentB1ockHashes11111111111111111111";
-const EPOCH_SCHEDULE_PROGRAM_ID: &str = "SysvarEpochSchedu1e111111111111111111111111";
-const FEES_PROGRAM_ID: &str = "SysvarFees111111111111111111111111111111111";
-const SLOT_HASHES_PROGRAM_ID: &str = "SysvarS1otHashes111111111111111111111111111";
-const SLOT_HISTORY_PROGRAM_ID: &str = "SysvarS1otHistory11111111111111111111111111";
-const STAKE_HISTORY_PROGRAM_ID: &str = "SysvarStakeHistory1111111111111111111111111";
-
-// BPF Loader 程序
-const BPF_LOADER_PROGRAM_ID: &str = "BPFLoader1111111111111111111111111111111111";
-const BPF_LOADER_2_PROGRAM_ID: &str = "BPFLoader2111111111111111111111111111111111";
-const BPF_LOADER_UPGRADEABLE_PROGRAM_ID: &str = "BPFLoaderUpgradeab1e11111111111111111111111";
-
-// 其他常见程序
-const CONFIG_PROGRAM_ID: &str = "Config1111111111111111111111111111111111111";
-const FEATURE_PROGRAM_ID: &str = "Feature111111111111111111111111111111111111";
-const COMPUTE_BUDGET_PROGRAM_ID: &str = "ComputeBudget111111111111111111111111111111";
-const ADDRESS_LOOKUP_TABLE_PROGRAM_ID: &str = "AddressLookupTab1e1111111111111111111111111";
-
-// Metaplex 相关程序（也很常见）
-const METAPLEX_TOKEN_METADATA_PROGRAM_ID: &str = "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s";
-const METAPLEX_AUCTION_HOUSE_PROGRAM_ID: &str = "hausS13jsjafwWwGqZTUQRmWyvyxn9EQpqMwV1PBBmk";
-
-const ALLOWED_PROGRAMS_FOR_SIMPLE_TRANSFER: [&str; 2] = [SYSTEM_PROGRAM_ID, MEMO_PROGRAM_ID];
+// 允许的简单转账程序
+const ALLOWED_PROGRAMS_FOR_SIMPLE_TRANSFER: [&str; 2] = [SYSTEM, MEMO];
 
 impl MevDetector {
-    /// 检查交易是否为简单的转账（仅涉及系统程序或Memo程序）。
+    /// 检查交易是否为简单的转账（仅涉及系统程序或Memo程序）
+    /// 
+    /// # 参数
+    /// * `tx` - 要检查的交易
+    /// 
+    /// # 返回值
+    /// 如果交易仅包含系统程序或Memo程序指令则返回true，否则返回false
     pub fn is_simple_transfer(&self, tx: &Transaction) -> bool {
         tx.transaction.message.instructions.iter().all(|inst| {
             if let Some(program_id) = tx
@@ -106,107 +91,19 @@ impl MevDetector {
         })
     }
 
-    /// 检查交易是否为投票交易或其他系统维护交易
-    pub fn is_vote_transaction(&self, tx: &Transaction) -> bool {
-        use log::debug;
-
-        // 检查账户列表中是否包含投票程序账户
-        let has_vote_account = tx
-            .transaction
-            .message
-            .account_keys
-            .iter()
-            .any(|account| account == VOTE_PROGRAM_ID);
-
-        if has_vote_account {
-            debug!("检测到投票交易（账户列表包含投票程序）: {}", tx.signature);
-            return true;
-        }
-
-        // 检查是否有质押程序账户
-        let has_stake_account = tx
-            .transaction
-            .message
-            .account_keys
-            .iter()
-            .any(|account| account == STAKE_PROGRAM_ID);
-
-        if has_stake_account {
-            debug!("检测到质押交易（账户列表包含质押程序）: {}", tx.signature);
-            return true;
-        }
-
-        // 检查程序ID（作为备用检测）
-        let has_vote_program = tx.transaction.message.instructions.iter().any(|inst| {
-            if let Some(program_id) = tx
-                .transaction
-                .message
-                .account_keys
-                .get(inst.program_id_index as usize)
-            {
-                program_id == VOTE_PROGRAM_ID || program_id == STAKE_PROGRAM_ID
-            } else {
-                false
-            }
-        });
-
-        if has_vote_program {
-            debug!("检测到投票/质押交易（程序ID检测）: {}", tx.signature);
-            return true;
-        }
-
-        false
-    }
-
-    /// 检查是否为已知的程序账户
-    fn is_known_program_account(&self, account: &str) -> bool {
-        // 检查是否为已知的DEX程序、系统程序或其他知名程序
-        let known_programs = [
-            RAYDIUM_AMM_PROGRAM_ID,
-            RAYDIUM_CLMM_PROGRAM_ID,
-            ORCA_WHIRLPOOLS_PROGRAM_ID,
-            ORCA_V1_PROGRAM_ID,
-            SERUM_DEX_PROGRAM_ID,
-            JUPITER_PROGRAM_ID,
-            PUMP_FUN_PROGRAM_ID,
-            SYSTEM_PROGRAM_ID,
-            MEMO_PROGRAM_ID,
-            VOTE_PROGRAM_ID,
-            STAKE_PROGRAM_ID,
-            // SPL Token 程序
-            TOKEN_PROGRAM_ID,
-            TOKEN_2022_PROGRAM_ID,
-            ASSOCIATED_TOKEN_PROGRAM_ID,
-            // 常见系统代币
-            WSOL_MINT,
-            // Solana 核心程序
-            RENT_PROGRAM_ID,
-            CLOCK_PROGRAM_ID,
-            RECENT_BLOCKHASHES_PROGRAM_ID,
-            EPOCH_SCHEDULE_PROGRAM_ID,
-            FEES_PROGRAM_ID,
-            SLOT_HASHES_PROGRAM_ID,
-            SLOT_HISTORY_PROGRAM_ID,
-            STAKE_HISTORY_PROGRAM_ID,
-            // BPF Loader 程序
-            BPF_LOADER_PROGRAM_ID,
-            BPF_LOADER_2_PROGRAM_ID,
-            BPF_LOADER_UPGRADEABLE_PROGRAM_ID,
-            // 其他常见程序
-            CONFIG_PROGRAM_ID,
-            FEATURE_PROGRAM_ID,
-            COMPUTE_BUDGET_PROGRAM_ID,
-            ADDRESS_LOOKUP_TABLE_PROGRAM_ID,
-            // Metaplex 相关程序
-            METAPLEX_TOKEN_METADATA_PROGRAM_ID,
-            METAPLEX_AUCTION_HOUSE_PROGRAM_ID,
-        ];
-
-        known_programs.contains(&account) || JITO_TIP_ACCOUNTS.contains(&account)
-    }
-
     /// 检查目标交易前后交易中是否有Jito小费地址，并返回小费交易的详细信息
-    /// 返回: (小费交易索引, 小费地址, 小费金额, 是否在目标交易前面, 捆绑包交易)
+    /// 
+    /// # 参数
+    /// * `block_transactions` - 区块中的所有交易
+    /// * `target_index` - 目标交易在区块中的索引
+    /// 
+    /// # 返回值
+    /// 返回包含以下信息的元组，如果没有找到Jito小费则返回None:
+    /// * 小费交易索引
+    /// * 小费地址
+    /// * 小费金额
+    /// * 是否在目标交易前面
+    /// * 捆绑包交易列表
     pub fn check_jito_tip_in_nearby_transactions(
         &self,
         block_transactions: &[Transaction],
@@ -245,13 +142,18 @@ impl MevDetector {
     /// 返回: (小费地址, 小费金额)
     fn check_single_transaction_for_jito_tip(&self, tx: &Transaction) -> Option<(String, u64)> {
         // 首先找到所有Jito小费地址在账户列表中的索引
-        let mut jito_tip_indices = Vec::new();
-        for (account_index, account) in tx.transaction.message.account_keys.iter().enumerate() {
-            if JITO_TIP_ACCOUNTS.contains(&account.as_str()) {
-                jito_tip_indices.push((account_index, account.clone()));
+        let jito_tip_indices: Vec<(usize, String)> = tx
+            .transaction
+            .message
+            .account_keys
+            .iter()
+            .enumerate()
+            .filter(|(_, account)| JITO_TIP_ACCOUNTS.contains(&account.as_str()))
+            .map(|(index, account)| {
                 debug!("发现Jito小费地址: {}", account);
-            }
-        }
+                (index, account.clone())
+            })
+            .collect();
 
         if jito_tip_indices.is_empty() {
             return None;
@@ -264,37 +166,17 @@ impl MevDetector {
                 .transaction
                 .message
                 .account_keys
-                .get(instruction.program_id_index as usize);
+                .get(instruction.program_id_index as usize)?;
 
             // 检查指令的账户索引列表是否包含任何Jito小费地址的索引
             for &account_index in &instruction.accounts {
                 for &(jito_index, ref jito_address) in &jito_tip_indices {
                     if account_index as usize == jito_index {
                         // 进一步检查是否为系统程序转账指令
-                        if program_id == Some(&SYSTEM_PROGRAM_ID.to_string()) {
-                            if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
-                                // 检查多种可能的转账指令格式
-                                let amount = if data.len() == 12 && data[0..4] == [2, 0, 0, 0] {
-                                    // 标准系统程序转账格式
-                                    u64::from_le_bytes(data[4..12].try_into().unwrap())
-                                } else if data.len() == 8 {
-                                    // 简化的转账格式 (只包含金额)
-                                    u64::from_le_bytes(data.try_into().unwrap())
-                                } else if data.len() >= 8 {
-                                    // 尝试从数据中提取金额 (可能在不同位置)
-                                    if data.len() >= 12 {
-                                        u64::from_le_bytes(data[4..12].try_into().unwrap())
-                                    } else {
-                                        u64::from_le_bytes(data[0..8].try_into().unwrap())
-                                    }
-                                } else {
-                                    0
-                                };
-
-                                if amount > 0 {
-                                    debug!("解析到Jito小费: {} lamports", amount);
-                                    return Some((jito_address.clone(), amount));
-                                }
+                        if program_id == SYSTEM {
+                            if let Some(amount) = self.parse_transfer_amount(&instruction.data) {
+                                debug!("解析到Jito小费: {} lamports", amount);
+                                return Some((jito_address.clone(), amount));
                             }
                         }
                     }
@@ -305,7 +187,44 @@ impl MevDetector {
         None
     }
 
+    /// 解析转账指令数据中的金额
+    fn parse_transfer_amount(&self, instruction_data: &str) -> Option<u64> {
+        let data = bs58::decode(instruction_data).into_vec().ok()?;
+        
+        let amount = match data.len() {
+            12 if data.get(0..4)? == [2, 0, 0, 0] => {
+                // 标准系统程序转账格式
+                u64::from_le_bytes(data.get(4..12)?.try_into().ok()?)
+            }
+            8 => {
+                // 简化的转账格式 (只包含金额)
+                u64::from_le_bytes(data.as_slice().try_into().ok()?)
+            }
+            len if len >= 12 => {
+                // 尝试从数据中提取金额
+                u64::from_le_bytes(data.get(4..12)?.try_into().ok()?)
+            }
+            len if len >= 8 => {
+                u64::from_le_bytes(data.get(0..8)?.try_into().ok()?)
+            }
+            _ => return None,
+        };
+
+        if amount > 0 {
+            Some(amount)
+        } else {
+            None
+        }
+    }
+
     /// 检测交易列表中是否存在三明治攻击 - 基于账户交集分析
+    /// 
+    /// # 参数
+    /// * `transactions` - 交易列表（通常是Jito捆绑包中的交易）
+    /// * `target_signature` - 目标交易的签名
+    /// 
+    /// # 返回值
+    /// 如果检测到三明治攻击，返回包含攻击详情和损失估算的结构体，否则返回None
     pub fn detect_sandwich_attack(
         &self,
         transactions: &[Transaction],
@@ -410,6 +329,13 @@ impl MevDetector {
     }
 
     /// 检测交易列表中是否存在抢跑攻击 - 基于账户交集分析
+    /// 
+    /// # 参数
+    /// * `transactions` - 交易列表（通常是Jito捆绑包中的交易）
+    /// * `target_signature` - 目标交易的签名
+    /// 
+    /// # 返回值
+    /// 如果检测到抢跑攻击，返回包含攻击详情的结构体，否则返回None
     pub fn detect_frontrun_attack(
         &self,
         transactions: &[Transaction],
@@ -480,7 +406,7 @@ impl MevDetector {
                 .get(instruction.program_id_index as usize)
             {
                 // 对于系统程序指令，检查是否为小额转账
-                if program_id == SYSTEM_PROGRAM_ID {
+                if program_id == SYSTEM {
                     if self.is_small_transfer_instruction(instruction, &tx.transaction.message.account_keys) {
                         continue; // 跳过小额转账账户
                     }
@@ -547,7 +473,7 @@ impl MevDetector {
     fn is_small_transfer_instruction(&self, instruction: &crate::client::Instruction, account_keys: &[String]) -> bool {
         // 只检查系统程序转账指令
         if let Some(program_id) = account_keys.get(instruction.program_id_index as usize) {
-            if program_id != SYSTEM_PROGRAM_ID {
+            if program_id != SYSTEM {
                 return false;
             }
         } else {
@@ -602,13 +528,13 @@ impl MevDetector {
     fn is_dex_transaction(&self, tx: &Transaction) -> bool {
         // 首先检查已知的DEX程序
         const DEX_PROGRAMS: [&str; 7] = [
-            RAYDIUM_AMM_PROGRAM_ID,
-            RAYDIUM_CLMM_PROGRAM_ID,
-            ORCA_WHIRLPOOLS_PROGRAM_ID,
-            ORCA_V1_PROGRAM_ID,
-            SERUM_DEX_PROGRAM_ID,
-            JUPITER_PROGRAM_ID,
-            PUMP_FUN_PROGRAM_ID,
+            RAYDIUM_AMM,
+            RAYDIUM_CLMM,
+            ORCA_WHIRLPOOLS,
+            ORCA_V1,
+            SERUM_DEX,
+            JUPITER,
+            PUMP_FUN,
         ];
 
         let has_known_dex = tx.transaction.message.instructions.iter().any(|inst| {
@@ -643,7 +569,7 @@ impl MevDetector {
         // 检查是否有非系统程序的指令
         let has_non_system_instructions = tx.transaction.message.instructions.iter().any(|inst| {
             if let Some(program_id) = tx.transaction.message.account_keys.get(inst.program_id_index as usize) {
-                program_id != SYSTEM_PROGRAM_ID && program_id != MEMO_PROGRAM_ID
+                program_id != SYSTEM && program_id != MEMO
             } else {
                 false
             }
@@ -922,7 +848,7 @@ impl MevDetector {
         for instruction in &tx.transaction.message.instructions {
             // 检查是否为系统程序转账指令
             if let Some(program_id) = tx.transaction.message.account_keys.get(instruction.program_id_index as usize) {
-                if program_id == SYSTEM_PROGRAM_ID {
+                if program_id == SYSTEM {
                     if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
                         let amount = if data.len() == 12 && data[0..4] == [2, 0, 0, 0] {
                             // 标准系统程序转账格式

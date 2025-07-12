@@ -186,6 +186,7 @@ async fn analyze_transaction(
                 println!("\n🚨 检测到三明治攻击!");
                 println!("  前置交易: https://solscan.io/tx/{}", sandwich.front_tx);
                 println!("  后置交易: https://solscan.io/tx/{}", sandwich.back_tx);
+                println!("  共享账户数: {}", sandwich.account_intersection.len());
                 
                 // 显示损失计算结果
                 if let Some(loss) = &sandwich.user_loss {
@@ -206,6 +207,7 @@ async fn analyze_transaction(
                 {
                     println!("\n🚨 检测到抢跑攻击!");
                     println!("  抢跑交易: https://solscan.io/tx/{}", frontrun.front_tx);
+                    println!("  共享账户数: {}", frontrun.account_intersection.len());
                 } else {
                     println!("\n✅ 未检测到MEV攻击");
                 }

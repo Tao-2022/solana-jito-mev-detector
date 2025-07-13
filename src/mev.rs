@@ -1,10 +1,13 @@
 use crate::client::Transaction;
+use crate::settings::MevDetectionConfig;
 use bs58;
 use log::{debug, info};
 use std::collections::HashSet;
 
 /// MEV检测器主结构体
-pub struct MevDetector;
+pub struct MevDetector {
+    pub config: MevDetectionConfig,
+}
 
 /// 三明治攻击检测结果
 #[derive(Debug, Clone)]
@@ -50,9 +53,6 @@ mod program_ids {
 
 use program_ids::*;
 
-// 配置常量
-const SMALL_TRANSFER_THRESHOLD: u64 = 1_000_000; // 0.001 SOL
-
 // Jito 小费账户列表
 const JITO_TIP_ACCOUNTS: [&str; 8] = [
     "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
@@ -69,6 +69,11 @@ const JITO_TIP_ACCOUNTS: [&str; 8] = [
 const ALLOWED_PROGRAMS_FOR_SIMPLE_TRANSFER: [&str; 2] = [SYSTEM, MEMO];
 
 impl MevDetector {
+    /// 创建新的MEV检测器实例
+    pub fn new(config: MevDetectionConfig) -> Self {
+        Self { config }
+    }
+
     /// 检查交易是否为简单的转账（仅涉及系统程序或Memo程序）
     ///
     /// # 参数
@@ -291,8 +296,9 @@ impl MevDetector {
                 let intersection_similarity =
                     self.calculate_intersection_similarity(front_intersection, back_intersection);
 
-                if intersection_similarity >= 0.7 {
-                    // 70%以上相似度认为是同一个池子
+                if intersection_similarity >= self.config.similarity_threshold {
+                    // 达到配置的相似度阈值认为是同一个池子
+                    //
                     info!(
                         "检测到三明治攻击模式，交集相似度: {:.1}%",
                         intersection_similarity * 100.0
@@ -508,7 +514,7 @@ impl MevDetector {
                 0
             };
 
-            amount > 0 && amount < SMALL_TRANSFER_THRESHOLD
+            amount > 0 && amount < self.config.small_transfer_threshold
         } else {
             false
         }
@@ -581,8 +587,8 @@ impl MevDetector {
         let account_count = tx.transaction.message.account_keys.len();
         let _instruction_count = tx.transaction.message.instructions.len();
 
-        // swap交易通常涉及至少6个账户（用户钱包、token账户、池子账户、程序等）
-        let has_multiple_accounts = account_count >= 6;
+        // swap交易通常涉及至少配置的最小账户数量（用户钱包、token账户、池子账户、程序等）
+        let has_multiple_accounts = account_count >= self.config.trade_size.min_swap_accounts;
 
         // 检查是否有非系统程序的指令
         let has_non_system_instructions = tx.transaction.message.instructions.iter().any(|inst| {
@@ -691,8 +697,9 @@ impl MevDetector {
         if front_impact > 0 && back_impact > 0 {
             // 计算由于价格影响导致的用户损失
             // 损失 = 用户交易规模 × 价格影响百分比
-            let price_impact_ratio =
-                (front_impact as f64 / (front_impact + user_trade_size) as f64) * 0.01;
+            let price_impact_ratio = (front_impact as f64
+                / (front_impact + user_trade_size) as f64)
+                * self.config.price_impact.price_impact_ratio;
             let estimated_loss = (user_trade_size as f64 * price_impact_ratio) as u64;
 
             // 计算MEV攻击者的净利润
@@ -703,7 +710,8 @@ impl MevDetector {
 
                 return Some(UserLoss {
                     estimated_loss_lamports: estimated_loss,
-                    loss_percentage: loss_percentage.min(10.0), // 限制最大10%
+                    loss_percentage: loss_percentage
+                        .min(self.config.price_impact.max_loss_percentage),
                     calculation_method: "价格影响分析法".to_string(),
                     mev_profit_lamports: mev_profit,
                 });
@@ -740,8 +748,11 @@ impl MevDetector {
                 attacker_front_size as f64 / (attacker_front_size + user_trade_size) as f64;
 
             // 估算用户损失 = 交易规模 × 相对影响 × 市场影响因子
-            let estimated_loss =
-                (user_trade_size as f64 * relative_impact * market_impact_factor * 0.005) as u64;
+            let estimated_loss = (user_trade_size as f64
+                * relative_impact
+                * market_impact_factor
+                * self.config.token_balance.loss_coefficient)
+                as u64;
 
             // MEV攻击者利润估算
             let mev_profit = (attacker_back_size as f64 * 0.8) as u64;
@@ -751,7 +762,8 @@ impl MevDetector {
 
                 return Some(UserLoss {
                     estimated_loss_lamports: estimated_loss,
-                    loss_percentage: loss_percentage.min(5.0), // 限制最大5%
+                    loss_percentage: loss_percentage
+                        .min(self.config.token_balance.max_loss_percentage),
                     calculation_method: "Token余额变化分析法".to_string(),
                     mev_profit_lamports: mev_profit,
                 });
@@ -770,14 +782,16 @@ impl MevDetector {
         let user_trade_size = self.estimate_trade_size(target_tx);
         let instruction_count = target_tx.transaction.message.instructions.len();
 
-        // 基础滑点估算: 0.1% - 2%
-        let base_slippage = 0.001; // 0.1%
+        // 基础滑点估算
+        let base_slippage = self.config.slippage.base_slippage;
 
         // 根据共享账户数量调整 (更多共享账户意味着更复杂的交易)
-        let complexity_factor = 1.0 + (shared_accounts.len() as f64 * 0.2);
+        let complexity_factor =
+            1.0 + (shared_accounts.len() as f64 * self.config.slippage.complexity_factor);
 
         // 根据指令数量调整
-        let instruction_factor = 1.0 + (instruction_count as f64 * 0.1);
+        let instruction_factor =
+            1.0 + (instruction_count as f64 * self.config.slippage.instruction_factor);
 
         // 计算最终滑点
         let final_slippage = base_slippage * complexity_factor * instruction_factor;
@@ -785,7 +799,7 @@ impl MevDetector {
 
         UserLoss {
             estimated_loss_lamports: estimated_loss,
-            loss_percentage: (final_slippage * 100.0).min(3.0), // 限制最大3%
+            loss_percentage: (final_slippage * 100.0).min(self.config.slippage.max_loss_percentage),
             calculation_method: "滑点估算法".to_string(),
             mev_profit_lamports: estimated_loss, // 假设MEV利润等于用户损失
         }
@@ -797,19 +811,21 @@ impl MevDetector {
 
         // 方法1: 通过SOL转账金额估算
         let sol_amount = self.extract_sol_transfer_amount(tx);
-        if sol_amount > SMALL_TRANSFER_THRESHOLD {
+        if sol_amount > self.config.small_transfer_threshold {
             total_size += sol_amount;
         }
 
         // 方法2: 通过指令复杂度估算
-        let instruction_complexity = tx.transaction.message.instructions.len() * 100_000_000; // 0.1 SOL per instruction
-        total_size += instruction_complexity as u64;
+        let instruction_complexity = tx.transaction.message.instructions.len() as u64
+            * self.config.trade_size.instruction_complexity_value;
+        total_size += instruction_complexity;
 
         // 方法3: 通过账户数量估算 (更多账户通常意味着更大的交易)
-        let account_factor = tx.transaction.message.account_keys.len() * 50_000_000; // 0.05 SOL per account
-        total_size += account_factor as u64;
+        let account_factor = tx.transaction.message.account_keys.len() as u64
+            * self.config.trade_size.account_factor_value;
+        total_size += account_factor;
 
-        total_size.max(100_000_000) // 最少估算为0.1 SOL
+        total_size.max(self.config.trade_size.min_trade_size)
     }
 
     /// 分析SOL余额变化来估算损失 (兜底方法)
@@ -873,9 +889,10 @@ impl MevDetector {
                     // 损失 = MEV利润 × (用户交易规模 / 总交易规模) × 影响因子
                     let total_volume = front_sol_amount + user_trade_size + back_sol_amount;
                     let user_ratio = user_trade_size as f64 / total_volume as f64;
-                    (mev_profit as f64 * user_ratio * 0.6) as u64 // 60%的影响因子
+                    (mev_profit as f64 * user_ratio * self.config.sol_balance.impact_factor) as u64
                 } else {
-                    (mev_profit as f64 * 0.3) as u64 // 保守估算30%
+                    (mev_profit as f64 * self.config.sol_balance.conservative_ratio) as u64
+                    // 保守估算
                 };
 
                 let loss_percentage = if user_trade_size > 0 {
@@ -886,7 +903,8 @@ impl MevDetector {
 
                 return Some(UserLoss {
                     estimated_loss_lamports: estimated_loss,
-                    loss_percentage: loss_percentage.min(8.0), // 限制最大8%
+                    loss_percentage: loss_percentage
+                        .min(self.config.sol_balance.max_loss_percentage),
                     calculation_method: "SOL余额变化分析法(改进版)".to_string(),
                     mev_profit_lamports: mev_profit,
                 });
@@ -923,7 +941,7 @@ impl MevDetector {
                             0
                         };
 
-                        if amount > SMALL_TRANSFER_THRESHOLD {
+                        if amount > self.config.small_transfer_threshold {
                             total_amount += amount;
                         }
                     }

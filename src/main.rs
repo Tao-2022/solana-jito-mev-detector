@@ -1,26 +1,19 @@
-use config::Config;
-use serde::Deserialize;
+use config::{Config, File};
 use std::io::{self, Write};
 
 mod client;
 mod mev;
+mod settings;
 
 use crate::client::SolanaClient;
 use crate::mev::MevDetector;
+use crate::settings::Settings;
 use log::{error, info};
-
-#[derive(Debug, Deserialize)]
-struct Settings {
-    rpc_url: String,
-    log_level: String,
-    #[serde(default)]
-    auto_detect_hashes: Vec<String>,
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
-        .add_source(config::File::with_name("config"))
+        .add_source(File::with_name("config"))
         .build()?;
 
     let settings: Settings = config.try_deserialize()?;
@@ -37,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "=".repeat(60));
 
     let client = SolanaClient::new(settings.rpc_url)?;
-    let detector = MevDetector;
+    let detector = MevDetector::new(settings.mev_detection.clone());
 
     // 检查是否有自动检测的哈希列表
     if !settings.auto_detect_hashes.is_empty() {

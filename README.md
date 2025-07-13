@@ -34,6 +34,8 @@
 - **直观输出界面** - 清晰的检测结果和损失报告
 - **连续检测模式** - 支持批量检测，无需重启
 - **详细日志记录** - 可配置的日志级别和调试信息
+- **🆕 灵活配置系统** - 通过 TOML 配置文件自定义所有检测参数
+- **🆕 参数热调整** - 无需修改源代码即可调整检测敏感度和损失计算参数
 
 ## 🏗️ 架构设计
 
@@ -85,6 +87,59 @@ auto_detect_hashes = [
     "your_transaction_hash_1",
     "your_transaction_hash_2"
 ]
+
+# MEV检测配置参数
+[mev_detection]
+# 交易相似度阈值 (0.0-1.0，默认0.5表示50%以上相似度认为是同一个池子)
+similarity_threshold = 0.5
+
+# 小额转账阈值 (lamports，默认1,000,000 = 0.001 SOL)
+small_transfer_threshold = 1000000
+
+# 价格影响分析法参数
+[mev_detection.price_impact]
+# 价格影响比例系数 (默认0.01)
+price_impact_ratio = 0.01
+# 最大损失百分比限制 (默认10.0%)
+max_loss_percentage = 10.0
+
+# Token余额变化分析法参数
+[mev_detection.token_balance]
+# 损失系数 (默认0.005)
+loss_coefficient = 0.005
+# 最大损失百分比限制 (默认5.0%)
+max_loss_percentage = 5.0
+
+# 滑点估算法参数
+[mev_detection.slippage]
+# 基础滑点 (默认0.001 = 0.1%)
+base_slippage = 0.001
+# 复杂度因子调整参数 (默认0.2)
+complexity_factor = 0.2
+# 指令因子调整参数 (默认0.1)
+instruction_factor = 0.1
+# 最大损失百分比限制 (默认3.0%)
+max_loss_percentage = 3.0
+
+# SOL余额变化分析法参数
+[mev_detection.sol_balance]
+# 影响因子 (默认0.6，即60%的影响因子)
+impact_factor = 0.6
+# 保守估算比例 (默认0.3，即30%)
+conservative_ratio = 0.3
+# 最大损失百分比限制 (默认8.0%)
+max_loss_percentage = 8.0
+
+# 交易规模估算参数
+[mev_detection.trade_size]
+# swap交易最少账户数量 (默认6)
+min_swap_accounts = 6
+# 每个指令的复杂度估算值 (lamports，默认100,000,000 = 0.1 SOL)
+instruction_complexity_value = 100000000
+# 每个账户的估算值 (lamports，默认50,000,000 = 0.05 SOL)
+account_factor_value = 50000000
+# 最小交易规模估算 (lamports，默认100,000,000 = 0.1 SOL)
+min_trade_size = 100000000
 ```
 
 ### 3️⃣ 编译运行
@@ -159,41 +214,47 @@ cargo run --release
 
 #### 1. 🎯 **价格影响分析法** (最准确)
 ```rust
-损失 = 用户交易规模 × 价格影响百分比
+损失 = 用户交易规模 × (配置的价格影响比例)
 ```
 - 分析攻击者对池子价格的直接影响
 - 基于实际交易规模计算损失
 - 准确性: ⭐⭐⭐⭐⭐
+- **可配置参数**: `price_impact_ratio`, `max_loss_percentage`
 
 #### 2. 📊 **Token余额变化法** (高准确)
 ```rust
-损失 = 用户规模 × 相对影响 × 市场因子 × 0.5%
+损失 = 用户规模 × 相对影响 × 市场因子 × (配置的损失系数)
 ```
 - 基于相对交易规模和市场影响因子
 - 考虑共享账户数量和攻击者交易规模
 - 准确性: ⭐⭐⭐⭐
+- **可配置参数**: `loss_coefficient`, `max_loss_percentage`
 
 #### 3. 💹 **SOL余额分析法** (中等准确)
 ```rust  
-损失 = MEV利润 × (用户规模/总规模) × 60%
+损失 = MEV利润 × (用户规模/总规模) × (配置的影响因子)
 ```
 - 基于交易规模比例的改进算法
 - 考虑用户在总交易量中的占比
 - 准确性: ⭐⭐⭐
+- **可配置参数**: `impact_factor`, `conservative_ratio`, `max_loss_percentage`
 
 #### 4. 📉 **滑点估算法** (兜底方案)
 ```rust
-损失 = 交易规模 × 动态滑点率
+损失 = 交易规模 × (配置的基础滑点 × 动态调整因子)
 ```
 - 基于交易复杂度和市场深度
 - 动态计算滑点率
 - 准确性: ⭐⭐
+- **可配置参数**: `base_slippage`, `complexity_factor`, `instruction_factor`, `max_loss_percentage`
 
 ### 算法优势
 
 - **智能降级**: 优先使用最准确的方法，失败时自动降级
-- **损失上限**: 各方法都有合理的损失上限保护
-- **实际验证**: 基于真实 MEV 攻击数据校准
+- **灵活配置**: 所有检测参数和损失计算系数均可通过配置文件调整
+- **损失上限**: 各方法都有可配置的合理损失上限保护
+- **实际验证**: 基于真实 MEV 攻击数据校准，支持用户自定义调优
+- **个性化调节**: 用户可根据风险偏好调整检测敏感度和损失估算保守程度
 
 ## 🔍 检测算法
 
@@ -223,8 +284,9 @@ graph TD
 
 #### 🎯 **三明治模式识别**
 - 前置交易 → 目标交易 → 后置交易
-- 账户交集相似度 ≥ 70%
+- 账户交集相似度 ≥ 配置的相似度阈值 (默认50%)
 - 相同签名者识别攻击者
+- **可配置**: 通过 `similarity_threshold` 调整检测敏感度
 
 #### 🏃 **抢跑检测**
 - 检测前置交易与目标交易的账户重叠
@@ -257,19 +319,84 @@ log_level = "info"           # 日志级别
 auto_detect_hashes = []      # 自动检测的交易列表
 ```
 
-### 高级配置
+### 高级 MEV 检测配置
 
-在 `src/mev.rs` 中可调整检测参数：
+#### 🎯 **相似度配置**
+```toml
+[mev_detection]
+# 交易相似度阈值 - 控制三明治攻击检测的敏感度
+similarity_threshold = 0.5    # 0.0-1.0，默认0.5 (50%)
 
-```rust
-// 损失计算参数
-const SMALL_TRANSFER_THRESHOLD: u64 = 1_000_000;  // 0.001 SOL
+# 小额转账过滤阈值 - 过滤掉小额转账以减少误报
+small_transfer_threshold = 1000000  # lamports (0.001 SOL)
+```
 
-// 检测敏感度
-const SIMILARITY_THRESHOLD: f64 = 0.7;            // 70% 相似度
+#### 💰 **损失计算配置**
 
-// 支持的 DEX 程序
-const DEX_PROGRAMS: [&str; 7] = [...];
+**价格影响分析法参数** (最精确的方法)
+```toml
+[mev_detection.price_impact]
+price_impact_ratio = 0.01        # 价格影响系数 (1%)
+max_loss_percentage = 10.0       # 最大损失限制 (10%)
+```
+
+**Token余额变化分析法参数**
+```toml
+[mev_detection.token_balance]
+loss_coefficient = 0.005         # 损失计算系数 (0.5%)
+max_loss_percentage = 5.0        # 最大损失限制 (5%)
+```
+
+**滑点估算法参数** (兜底方案)
+```toml
+[mev_detection.slippage]
+base_slippage = 0.001           # 基础滑点 (0.1%)
+complexity_factor = 0.2         # 复杂度调整因子
+instruction_factor = 0.1        # 指令数量调整因子
+max_loss_percentage = 3.0       # 最大损失限制 (3%)
+```
+
+**SOL余额变化分析法参数**
+```toml
+[mev_detection.sol_balance]
+impact_factor = 0.6             # 影响因子 (60%)
+conservative_ratio = 0.3        # 保守估算比例 (30%)
+max_loss_percentage = 8.0       # 最大损失限制 (8%)
+```
+
+#### 📊 **交易规模估算配置**
+```toml
+[mev_detection.trade_size]
+min_swap_accounts = 6                    # 识别swap的最少账户数
+instruction_complexity_value = 100000000 # 每指令估值 (0.1 SOL)
+account_factor_value = 50000000          # 每账户估值 (0.05 SOL)
+min_trade_size = 100000000              # 最小交易规模 (0.1 SOL)
+```
+
+### 配置调优指南
+
+#### 🔧 **提高检测敏感度**
+```toml
+# 更容易检测到MEV攻击，但可能增加误报
+similarity_threshold = 0.3        # 降低相似度要求
+small_transfer_threshold = 500000  # 降低小额转账阈值
+```
+
+#### 🎯 **降低误报率**
+```toml
+# 更严格的检测条件，减少误报但可能漏检
+similarity_threshold = 0.7        # 提高相似度要求
+min_swap_accounts = 8            # 提高swap识别门槛
+```
+
+#### 💡 **经济损失敏感度调整**
+```toml
+# 调整各种损失计算方法的敏感度
+[mev_detection.price_impact]
+price_impact_ratio = 0.005       # 降低价格影响敏感度
+
+[mev_detection.token_balance]
+loss_coefficient = 0.003         # 更保守的损失估算
 ```
 
 ### 日志级别说明
@@ -399,6 +526,15 @@ git push origin feature/amazing-feature
 ### 社区
 - [Solana Discord](https://discord.gg/solana)
 - [Rust 官方论坛](https://users.rust-lang.org/)
+
+## 🚀 版本更新
+
+### v0.2.0 - 配置系统重构
+- ✨ 新增完整的 TOML 配置文件支持
+- 🔧 所有MEV检测参数现在可通过配置文件调整
+- 📊 支持4种损失计算算法的独立参数配置
+- ⚡ 用户可根据需求自定义检测敏感度
+- 🎯 新增配置调优指南和最佳实践建议
 
 ---
 

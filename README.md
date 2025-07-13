@@ -1,4 +1,4 @@
-# 🔍 Solana MEV 检测器
+# 🔍 Solana MEV 检测器（韭菜检测器）
 
 <div align="center">
 

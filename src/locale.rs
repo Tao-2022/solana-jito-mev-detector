@@ -30,7 +30,7 @@ impl Locale {
     pub fn starting(&self) -> &'static str {
         match self.lang {
             Language::English => "Starting Solana MEV Detector...",
-            Language::Chinese => "Solana MEV 0.21检测器启动...",
+            Language::Chinese => "Solana MEV 检测器启动...",
         }
     }
 

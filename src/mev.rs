@@ -1184,17 +1184,42 @@ impl MevDetector {
     }
     
     /// 创建基于精确分析的代币损失详情
-    fn create_precise_token_losses(&self, _inflow: &PreciseInflowAnalysis, estimated_loss: u64) -> Vec<TokenLossDetail> {
+    fn create_precise_token_losses(&self, inflow: &PreciseInflowAnalysis, estimated_sol_loss: u64) -> Vec<TokenLossDetail> {
         let mut losses = Vec::new();
         
-        // 添加SOL损失
-        if estimated_loss > 0 {
+        // 添加SOL损失（如果有）
+        if estimated_sol_loss > 0 {
             losses.push(TokenLossDetail {
                 token_address: WSOL.to_string(),
                 token_symbol: "SOL".to_string(),
-                loss_amount: estimated_loss,
-                loss_amount_ui: estimated_loss as f64 / 1_000_000_000.0,
+                loss_amount: estimated_sol_loss,
+                loss_amount_ui: estimated_sol_loss as f64 / 1_000_000_000.0,
             });
+        }
+        
+        // 添加Token损失（基于前置交易中检测到的Token流入）
+        for token_flow in &inflow.token_inflows {
+            // 估算该Token的损失：使用Token流入量的1-3%作为损失估算
+            let loss_rate = if token_flow.token_symbol == "USDC" || token_flow.token_symbol == "USDT" {
+                0.02 // 稳定币损失率2%
+            } else {
+                0.015 // 其他Token损失率1.5%
+            };
+            
+            let token_loss_ui = token_flow.amount_ui * loss_rate;
+            let token_loss_amount = (token_flow.amount as f64 * loss_rate) as u64;
+            
+            if token_loss_ui > 0.001 { // 只记录大于0.001单位的损失
+                losses.push(TokenLossDetail {
+                    token_address: token_flow.token_address.clone(),
+                    token_symbol: token_flow.token_symbol.clone(),
+                    loss_amount: token_loss_amount,
+                    loss_amount_ui: token_loss_ui,
+                });
+                
+                debug!("检测到{}损失: {:.6} {}", 
+                       token_flow.token_symbol, token_loss_ui, token_flow.token_symbol);
+            }
         }
         
         losses

@@ -89,10 +89,8 @@ Please enter a Solana transaction hash (or 'exit'/'quit' to close):",
 
     pub fn analyzing(&self) -> &'static str {
         match self.lang {
-            Language::English => "
-🔄 Analyzing transaction: {}",
-            Language::Chinese => "
-🔄 正在分析交易: {}",
+            Language::English => "🔄 Analyzing transaction:",
+            Language::Chinese => "🔄 正在分析交易:",
         }
     }
 
@@ -176,28 +174,28 @@ Please enter a Solana transaction hash (or 'exit'/'quit' to close):",
     pub fn tip_location(&self) -> &'static str {
         match self.lang {
             Language::English => "📍 Jito tip location: {} the target transaction",
-            Language::Chinese => "📍 Jito小费位置: 目标交易{}方",
+            Language::Chinese => "📍 Jito小费位置: 目标交易{}",
         }
     }
 
     pub fn tip_location_before(&self) -> &'static str {
         match self.lang {
             Language::English => "before",
-            Language::Chinese => "前",
+            Language::Chinese => "前方",
         }
     }
 
     pub fn tip_location_after(&self) -> &'static str {
         match self.lang {
             Language::English => "after",
-            Language::Chinese => "后",
+            Language::Chinese => "后方",
         }
     }
 
     pub fn tip_amount(&self) -> &'static str {
         match self.lang {
-            Language::English => "💰 Tip amount: {:.6} SOL",
-            Language::Chinese => "💰 小费金额: {:.6} SOL",
+            Language::English => "💰 Tip amount:",
+            Language::Chinese => "💰 小费金额:",
         }
     }
 
@@ -210,22 +208,22 @@ Please enter a Solana transaction hash (or 'exit'/'quit' to close):",
 
     pub fn jito_tip_tx(&self) -> &'static str {
         match self.lang {
-            Language::English => "  {}. Jito tip transaction ⭐",
-            Language::Chinese => "  {}. Jito小费交易 ⭐",
+            Language::English => ". Jito tip transaction ⭐",
+            Language::Chinese => ". Jito小费交易 ⭐",
         }
     }
 
     pub fn target_tx(&self) -> &'static str {
         match self.lang {
-            Language::English => "  {}. Target transaction 🎯",
-            Language::Chinese => "  {}. 目标交易 🎯",
+            Language::English => ". Target transaction 🎯",
+            Language::Chinese => ". 目标交易 🎯",
         }
     }
 
     pub fn other_tx(&self) -> &'static str {
         match self.lang {
-            Language::English => "  {}. Other transaction",
-            Language::Chinese => "  {}. 其他交易",
+            Language::English => ". Other transaction",
+            Language::Chinese => ". 其他交易",
         }
     }
 
@@ -254,8 +252,8 @@ Please enter a Solana transaction hash (or 'exit'/'quit' to close):",
 
     pub fn shared_accounts(&self) -> &'static str {
         match self.lang {
-            Language::English => "  Shared accounts: {}",
-            Language::Chinese => "  共享账户数: {}",
+            Language::English => "  Shared accounts:",
+            Language::Chinese => "  共享账户数:",
         }
     }
 
@@ -270,29 +268,29 @@ Please enter a Solana transaction hash (or 'exit'/'quit' to close):",
 
     pub fn loss_amount(&self) -> &'static str {
         match self.lang {
-            Language::English => "  Loss amount: {:.6} SOL",
-            Language::Chinese => "  损失金额: {:.6} SOL",
+            Language::English => "  Loss amount:",
+            Language::Chinese => "  损失金额:",
         }
     }
 
     pub fn loss_percentage(&self) -> &'static str {
         match self.lang {
-            Language::English => "  Loss percentage: {:.2}%",
-            Language::Chinese => "  损失百分比: {:.2}%",
+            Language::English => "  Loss percentage:",
+            Language::Chinese => "  损失百分比:",
         }
     }
 
     pub fn mev_profit(&self) -> &'static str {
         match self.lang {
-            Language::English => "  MEV profit: {:.6} SOL",
-            Language::Chinese => "  MEV利润: {:.6} SOL",
+            Language::English => "  MEV profit:",
+            Language::Chinese => "  MEV利润:",
         }
     }
 
     pub fn calculation_method(&self) -> &'static str {
         match self.lang {
-            Language::English => "  Calculation method: {}",
-            Language::Chinese => "  计算方法: {}",
+            Language::English => "  Calculation method:",
+            Language::Chinese => "  计算方法:",
         }
     }
 

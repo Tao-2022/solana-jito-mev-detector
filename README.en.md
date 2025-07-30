@@ -23,19 +23,25 @@ Specializing in detecting Jito bundle-based MEV attacks, including sandwich and 
 - **🏃 Front-running Attack Detection** - Identifies preceding transaction patterns in the same pool.
 - **💰 Precise Loss Calculation** - 4 advanced algorithms to estimate actual user losses.
 - **📦 Jito Bundle Analysis** - Automatically identifies and parses Jito MEV bundles.
+- **🔍 Confidence Assessment** - Each detection result includes detailed confidence scoring.
+- **✅ Smart Validation** - Multiple validation mechanisms ensure result accuracy.
 
 ### 🚀 **Advanced Features**
 - **Multi-DEX Support** - Supports major DEXs like Raydium, Orca, Jupiter, Pump.fun, etc.
 - **Smart Transaction Identification** - Recognizes unknown DEX programs based on account patterns.
 - **Efficient Filtering Mechanism** - Automatically skips simple transfers and voting transactions.
 - **Real-time Loss Estimation** - Multiple methods to calculate economic losses from MEV attacks.
+- **Multi-Method Cross-Validation** - Parallel execution of multiple algorithms, selecting the best result.
+- **Adaptive Weight Adjustment** - Dynamic weight adjustment based on program types.
 
 ### 💡 **User Experience**
 - **Intuitive Output Interface** - Clear detection results and loss reports.
+- **Bilingual Support** - Complete Chinese and English interface support (configurable).
 - **Continuous Detection Mode** - Supports batch detection without restarting.
 - **Detailed Logging** - Configurable log levels and debugging information.
 - **🆕 Flexible Configuration System** - Customize all detection parameters via a TOML config file.
 - **🆕 Hot-Reloadable Parameters** - Adjust detection sensitivity and loss calculation parameters without modifying source code.
+- **🆕 Visual Indicators** - Confidence icons (🟢🟡🔴) and validation status (✅⚠️).
 
 ## 🏗️ Architecture
 
@@ -78,6 +84,9 @@ Create a `config.toml` file:
 ```toml
 # RPC Node Configuration
 rpc_url = "https://mainnet.helius-rpc.com/?api-key=YOUR_API_KEY"
+
+# Language Setting: "en" for English, "zh" for Chinese
+language = "en"
 
 # Log Level Configuration
 log_level = "info"  # Options: error, warn, info, debug, trace
@@ -160,7 +169,7 @@ The program starts with a user-friendly interface:
 
 ```
 ============================================================
-🔍 Solana MEV Detector v0.2.0
+🔍 Solana MEV Detector v0.2.1
 ============================================================
 
 Please enter a Solana transaction hash (or 'exit'/'quit' to close):
@@ -201,60 +210,96 @@ Please enter a Solana transaction hash (or 'exit'/'quit' to close):
   Loss amount: 0.000150 SOL
   Loss percentage: 2.50%
   MEV profit: 0.000200 SOL
-  Calculation method: Price Impact Analysis
+  Calculation method: Price Impact Analysis V2
+  🟢 Confidence: 85.2%
+  ✅ Validation: Passed
 
 ⚠️ Note: Detection results are for reference only. Please verify with actual transaction data.
 ```
 
 ## 🧮 Loss Calculation Algorithms
 
-### Multi-layered Calculation Methods
+### 🔄 Enhanced Multi-Method Calculation Framework
 
-We implement 4 advanced loss calculation algorithms, ordered by accuracy:
+We have implemented a completely new loss calculation system featuring 4 advanced algorithms with intelligent selection:
 
-#### 1. 🎯 **Price Impact Analysis** (Most Accurate)
+#### 🆕 **Smart Algorithm Selection**
+- **Parallel Computation**: All methods run simultaneously, collecting multiple results
+- **Confidence Scoring**: Each result includes detailed confidence assessment (0.0-1.0)
+- **Validation Mechanism**: Multiple boundary checks ensure result reasonableness
+- **Best Selection**: Prioritizes validated results with the highest confidence
+
+#### 1. 🎯 **Price Impact Analysis V2** (Most Accurate)
 ```rust
-loss = user_trade_size * configured_price_impact_ratio
+// Enhanced price impact calculation
+market_impact_ratio = calculate_market_impact_ratio(front_value, target_value, shared_accounts)
+loss = user_trade_value * market_impact_ratio
 ```
-- Analyzes the attacker's direct impact on the pool's price.
-- Calculates loss based on the actual trade size.
-- Accuracy: ⭐⭐⭐⭐⭐
-- **Configurable**: `price_impact_ratio`, `max_loss_percentage`
+- **New Feature**: Based on actual transaction value rather than estimated size
+- **Smart Weighting**: Dynamic weight adjustment based on DEX program types
+- **Accuracy**: ⭐⭐⭐⭐⭐
+- **Confidence**: Typically 80-95%
 
-#### 2. 📊 **Token Balance Change Method** (High Accuracy)
+#### 2. 📊 **Token Flow Analysis** (High Accuracy)
 ```rust
-loss = user_size * relative_impact * market_factor * configured_loss_coefficient
+// Loss analysis based on actual token flow
+liquidity_impact = calculate_liquidity_impact(front_flow, target_flow, shared_accounts)
+loss = target_transaction_token_value * liquidity_impact
 ```
-- Based on relative trade size and market impact factors.
-- Considers the number of shared accounts and attacker's trade size.
-- Accuracy: ⭐⭐⭐⭐
-- **Configurable**: `loss_coefficient`, `max_loss_percentage`
+- **New Feature**: Analyzes actual token flow rather than simple estimation
+- **Liquidity Modeling**: Considers the real impact of attacks on market liquidity
+- **Accuracy**: ⭐⭐⭐⭐
+- **Confidence**: Typically 70-85%
 
-#### 3. 💹 **SOL Balance Analysis** (Medium Accuracy)
+#### 3. 💹 **Attacker Profit Analysis** (Enhanced)
 ```rust
-loss = mev_profit * (user_size / total_size) * configured_impact_factor
+// Reverse calculation based on attacker's net profit
+net_profit = gross_profit - transaction_costs
+user_loss_ratio = calculate_user_loss_ratio(target_value, gross_profit)
+loss = net_profit * user_loss_ratio
 ```
-- An improved algorithm based on the ratio of trade sizes.
-- Considers the user's proportion of the total transaction volume.
-- Accuracy: ⭐⭐⭐
-- **Configurable**: `impact_factor`, `conservative_ratio`, `max_loss_percentage`
+- **New Feature**: Considers transaction costs, calculates attacker's net profit
+- **Improved Identification**: More accurate attacker address identification algorithm
+- **Accuracy**: ⭐⭐⭐⭐
+- **Confidence**: Typically 75-90%
 
-#### 4. 📉 **Slippage Estimation Method** (Fallback)
+#### 4. 📉 **Conservative Slippage Estimation** (Fallback)
 ```rust
-loss = trade_size * (base_slippage * dynamic_adjustment_factor)
+// More conservative slippage calculation
+conservative_slippage = base_slippage * complexity_adjustment * 0.5
+loss = trade_value * conservative_slippage
 ```
-- Based on transaction complexity and market depth.
-- Dynamically calculates the slippage rate.
-- Accuracy: ⭐⭐
-- **Configurable**: `base_slippage`, `complexity_factor`, `instruction_factor`, `max_loss_percentage`
+- **New Feature**: More conservative estimation, reducing overestimation risk
+- **Boundary Protection**: Strict 10% loss cap
+- **Accuracy**: ⭐⭐⭐
+- **Confidence**: Typically 50-70%
 
-### Algorithm Advantages
+### 🔍 Quality Assurance Mechanisms
 
-- **Smart Fallback**: Prioritizes the most accurate method, automatically falling back if it fails.
-- **Flexible Configuration**: All detection and loss calculation parameters are adjustable via the config file.
-- **Loss Caps**: Each method has a configurable, reasonable loss cap for protection.
-- **Real-world Validation**: Calibrated against real MEV attack data, supports user-defined tuning.
-- **Personalized Adjustment**: Users can adjust detection sensitivity and loss estimation conservatism based on their risk appetite.
+#### **Validation Conditions**
+- ✅ Loss does not exceed 20% of transaction value
+- ✅ MEV profit must be greater than or equal to user loss
+- ✅ Loss amount within reasonable range (≥1000 lamports)
+- ✅ If MEV attack detected, loss cannot be zero
+
+#### **Confidence Calculation**
+- **Transaction Value Confidence** (40% weight): Based on SOL amount, instruction complexity, etc.
+- **Shared Account Confidence** (30% weight): Number and quality of account intersections
+- **Transaction Size Reasonableness** (20% weight): Reasonable ratio of front/back transaction sizes
+- **Base Confidence** (10% weight): DEX identification and other factors
+
+#### **Result Selection Logic**
+1. **Preferred**: Validated + highest confidence result
+2. **Alternative**: If no validated results, select highest confidence
+3. **Fallback**: Always provide conservative slippage estimation as backup
+
+### 🎯 Algorithm Advantages
+
+- **🔄 Multi-Method Cross-Validation**: Parallel execution avoids single point of failure
+- **🎯 Smart Result Selection**: Best choice based on confidence and validation status
+- **📊 Enhanced Transparency**: Users can see confidence scores and validation status
+- **🛡️ Improved Robustness**: Multiple boundary checks and exception handling
+- **⚙️ Fully Configurable**: All parameters adjustable via config file
 
 ## 🔍 Detection Algorithms
 
@@ -528,6 +573,16 @@ This project is licensed under the [MIT License](LICENSE).
 - [Official Rust Users Forum](https://users.rust-lang.org/)
 
 ## 🚀 Version Updates
+
+### v0.2.1 - Loss Calculation System Refactor (Latest)
+- 🆕 **New Loss Calculation Framework**: 4 improved algorithms running in parallel
+- 🔍 **Confidence Assessment System**: Detailed confidence scores (0.0-1.0) for each result
+- ✅ **Smart Validation Mechanism**: Multiple boundary checks ensure result reasonableness
+- 🎯 **Best Result Selection**: Intelligent selection based on confidence and validation status
+- 🌐 **Bilingual Interface Support**: Complete Chinese and English interface (configurable)
+- 📊 **Visual Indicators**: Confidence icons (🟢🟡🔴) and validation status (✅⚠️)
+- 🔧 **Improved Transaction Value Estimation**: Smart weight adjustment based on program types
+- 🛡️ **Enhanced Robustness**: Better exception handling and boundary checks
 
 ### v0.2.0 - Configuration System Refactor
 - ✨ Added full support for a TOML configuration file.

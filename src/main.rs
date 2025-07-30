@@ -147,9 +147,9 @@ async fn analyze_transaction(
         };
 
     println!(
-        "{} {}",
-        locale.analyzing_nearby(),
-        nearby_transactions.len()
+        "{}",
+        locale.analyzing_nearby()
+            .replace("{}", &nearby_transactions.len().to_string())
     );
 
     let jito_tip_info =
@@ -164,7 +164,7 @@ async fn analyze_transaction(
             } else {
                 locale.tip_location_after()
             };
-            println!("{} {}", locale.tip_location(), tip_position);
+            println!("{}", locale.tip_location().replace("{}", tip_position));
             println!(
                 "{} {:.9} SOL",
                 locale.tip_amount(),
@@ -172,17 +172,17 @@ async fn analyze_transaction(
             );
 
             println!(
-                "{} {}",
-                locale.bundle_contains(),
-                bundle_transactions.len()
+                "{}",
+                locale.bundle_contains()
+                    .replace("{}", &bundle_transactions.len().to_string())
             );
             for (i, tx) in bundle_transactions.iter().enumerate() {
                 if tx.signature == nearby_transactions[tip_index].signature {
-                    println!("{} {}", locale.jito_tip_tx(), i + 1);
+                    println!("  {}{}", i + 1, locale.jito_tip_tx());
                 } else if tx.signature == target_signature {
-                    println!("{} {}", locale.target_tx(), i + 1);
+                    println!("  {}{}", i + 1, locale.target_tx());
                 } else {
-                    println!("{} {}", locale.other_tx(), i + 1);
+                    println!("  {}{}", i + 1, locale.other_tx());
                 }
             }
 
@@ -212,6 +212,19 @@ async fn analyze_transaction(
                         loss.mev_profit_lamports as f64 / 1_000_000_000.0
                     );
                     println!("{} {}", locale.calculation_method(), loss.calculation_method);
+                    
+                    // 显示新的置信度和验证信息
+                    let confidence_icon = if loss.confidence_score >= 0.8 {
+                        "🟢"
+                    } else if loss.confidence_score >= 0.6 {
+                        "🟡"
+                    } else {
+                        "🔴"
+                    };
+                    println!("  {} Confidence: {:.1}%", confidence_icon, loss.confidence_score * 100.0);
+                    
+                    let validation_icon = if loss.validation_passed { "✅" } else { "⚠️" };
+                    println!("  {} Validation: {}", validation_icon, if loss.validation_passed { "Passed" } else { "Failed" });
                 } else {
                     println!("{}", locale.cannot_calculate_loss());
                 }

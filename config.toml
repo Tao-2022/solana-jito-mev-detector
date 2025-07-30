@@ -2,7 +2,7 @@
 rpc_url = "https://api.mainnet-beta.solana.com"
 
 # Language setting: "en" for English, "zh" for Chinese
-language = "en"
+language = "zh"
 
 # 要自动检测的交易哈希列表 (可选，如果为空则不会自动检测)
 auto_detect_hashes = []

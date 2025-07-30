@@ -1,4 +1,5 @@
 use crate::client::Transaction;
+use crate::locale::{Language, Locale};
 use crate::settings::MevDetectionConfig;
 use bs58;
 use log::{debug, info};
@@ -7,6 +8,7 @@ use std::collections::HashSet;
 /// MEV检测器主结构体
 pub struct MevDetector {
     pub config: MevDetectionConfig,
+    locale: Locale,
 }
 
 /// 三明治攻击检测结果
@@ -70,8 +72,8 @@ const ALLOWED_PROGRAMS_FOR_SIMPLE_TRANSFER: [&str; 2] = [SYSTEM, MEMO];
 
 impl MevDetector {
     /// 创建新的MEV检测器实例
-    pub fn new(config: MevDetectionConfig) -> Self {
-        Self { config }
+    pub fn new(config: MevDetectionConfig, language: Language) -> Self {
+        Self { config, locale: Locale::new(language) }
     }
 
     /// 检查交易是否为简单的转账（仅涉及系统程序或Memo程序）
@@ -119,7 +121,7 @@ impl MevDetector {
             let tx = &block_transactions[i];
             if let Some((tip_account, tip_amount)) = self.check_single_transaction_for_jito_tip(tx)
             {
-                info!("在目标交易前发现Jito小费交易");
+                info!("{}", self.locale.jito_tip_found_before());
                 // Jito小费在前面，捆绑该交易+往后4个交易（包含目标交易）
                 let bundle_end = (i + 5).min(block_transactions.len());
                 let bundle_transactions = block_transactions[i..bundle_end].to_vec();
@@ -132,7 +134,7 @@ impl MevDetector {
             let tx = &block_transactions[i];
             if let Some((tip_account, tip_amount)) = self.check_single_transaction_for_jito_tip(tx)
             {
-                info!("在目标交易后发现Jito小费交易");
+                info!("{}", self.locale.jito_tip_found_after());
                 // Jito小费在后面，捆绑该交易+往前4个交易（包含目标交易）
                 let bundle_start = i.saturating_sub(4);
                 let bundle_transactions = block_transactions[bundle_start..=i].to_vec();
@@ -155,7 +157,7 @@ impl MevDetector {
             .enumerate()
             .filter(|(_, account)| JITO_TIP_ACCOUNTS.contains(&account.as_str()))
             .map(|(index, account)| {
-                debug!("发现Jito小费地址: {}", account);
+                debug!("Found Jito tip account: {}", account);
                 (index, account.clone())
             })
             .collect();
@@ -180,7 +182,7 @@ impl MevDetector {
                         // 进一步检查是否为系统程序转账指令
                         if program_id == SYSTEM {
                             if let Some(amount) = self.parse_transfer_amount(&instruction.data) {
-                                debug!("解析到Jito小费: {} lamports", amount);
+                                debug!("{}: {}", self.locale.jito_tip_parsed(), amount);
                                 return Some((jito_address.clone(), amount));
                             }
                         }
@@ -249,7 +251,7 @@ impl MevDetector {
             return None;
         }
 
-        debug!("目标交易过滤后账户数量: {}", target_accounts.len());
+        debug!("Target transaction filtered accounts: {}", target_accounts.len());
 
         // 寻找前两个交易中与目标交易有账户交集的交易
         let mut front_candidates = Vec::new();
@@ -300,7 +302,8 @@ impl MevDetector {
                     // 达到配置的相似度阈值认为是同一个池子
                     //
                     info!(
-                        "检测到三明治攻击模式，交集相似度: {:.1}%",
+                        "{} {:.1}%",
+                        self.locale.sandwich_pattern_detected(),
                         intersection_similarity * 100.0
                     );
 
@@ -364,7 +367,7 @@ impl MevDetector {
         }
 
         debug!(
-            "抢跑检测 - 目标交易过滤后账户数量: {}",
+            "Front-run detection - target transaction filtered accounts: {}",
             target_accounts.len()
         );
 
@@ -388,7 +391,7 @@ impl MevDetector {
 
             // 如果存在账户交集，则判定为抢跑攻击
             if !intersection.is_empty() {
-                info!("检测到抢跑攻击模式，共享账户数: {}", intersection.len());
+                info!("{} {}", self.locale.frontrun_pattern_detected(), intersection.len());
 
                 return Some(FrontrunDetails {
                     front_tx: potential_frontrun.signature.clone(),
@@ -635,7 +638,7 @@ impl MevDetector {
         back_tx_sig: &str,
         shared_accounts: &[String],
     ) -> Option<UserLoss> {
-        debug!("开始计算三明治攻击损失");
+        debug!("{}", self.locale.calculating_sandwich_loss());
 
         // 获取三笔交易
         let target_tx = &transactions[target_index];
@@ -648,7 +651,7 @@ impl MevDetector {
         if let Some(loss) =
             self.analyze_price_impact_loss(front_tx, target_tx, back_tx, shared_accounts)
         {
-            debug!("使用价格影响分析法计算损失");
+            debug!("{}", self.locale.using_price_impact());
             return Some(loss);
         }
 
@@ -656,19 +659,19 @@ impl MevDetector {
         if let Some(loss) =
             self.analyze_token_balance_changes(front_tx, target_tx, back_tx, shared_accounts)
         {
-            debug!("使用Token余额变化分析法计算损失");
+            debug!("{}", self.locale.using_token_balance());
             return Some(loss);
         }
 
         // 方法3: 分析攻击者的SOL余额变化 (兜底方法)
         if let Some(loss) = self.analyze_sol_balance_changes(front_tx, target_tx, back_tx) {
-            debug!("使用SOL余额变化分析法计算损失");
+            debug!("{}", self.locale.using_sol_balance());
             return Some(loss);
         }
 
         // 方法4: 滑点估算法 (基于交易规模)
         let slippage_loss = self.estimate_slippage_loss(target_tx, shared_accounts);
-        debug!("使用滑点估算法计算损失");
+        debug!("{}", self.locale.using_slippage());
         Some(slippage_loss)
     }
 
@@ -712,7 +715,7 @@ impl MevDetector {
                     estimated_loss_lamports: estimated_loss,
                     loss_percentage: loss_percentage
                         .min(self.config.price_impact.max_loss_percentage),
-                    calculation_method: "价格影响分析法".to_string(),
+                    calculation_method: self.locale.price_impact_method_name().to_string(),
                     mev_profit_lamports: mev_profit,
                 });
             }
@@ -764,7 +767,7 @@ impl MevDetector {
                     estimated_loss_lamports: estimated_loss,
                     loss_percentage: loss_percentage
                         .min(self.config.token_balance.max_loss_percentage),
-                    calculation_method: "Token余额变化分析法".to_string(),
+                    calculation_method: self.locale.token_balance_method_name().to_string(),
                     mev_profit_lamports: mev_profit,
                 });
             }
@@ -800,7 +803,7 @@ impl MevDetector {
         UserLoss {
             estimated_loss_lamports: estimated_loss,
             loss_percentage: (final_slippage * 100.0).min(self.config.slippage.max_loss_percentage),
-            calculation_method: "滑点估算法".to_string(),
+            calculation_method: self.locale.slippage_method_name().to_string(),
             mev_profit_lamports: estimated_loss, // 假设MEV利润等于用户损失
         }
     }
@@ -875,9 +878,9 @@ impl MevDetector {
             let back_sol_amount = self.extract_sol_transfer_amount(back_tx);
             let target_sol_amount = self.extract_sol_transfer_amount(target_tx);
 
-            debug!("前置交易SOL转账: {} lamports", front_sol_amount);
-            debug!("目标交易SOL转账: {} lamports", target_sol_amount);
-            debug!("后置交易SOL转账: {} lamports", back_sol_amount);
+            debug!("{} {}", self.locale.front_tx_sol_transfer(), front_sol_amount);
+            debug!("{} {}", self.locale.target_tx_sol_transfer(), target_sol_amount);
+            debug!("{} {}", self.locale.back_tx_sol_transfer(), back_sol_amount);
 
             // 估算MEV利润 = 后置交易收益 - 前置交易成本
             let mev_profit = back_sol_amount.saturating_sub(front_sol_amount);
@@ -905,7 +908,7 @@ impl MevDetector {
                     estimated_loss_lamports: estimated_loss,
                     loss_percentage: loss_percentage
                         .min(self.config.sol_balance.max_loss_percentage),
-                    calculation_method: "SOL余额变化分析法(改进版)".to_string(),
+                    calculation_method: self.locale.sol_balance_method_name().to_string(),
                     mev_profit_lamports: mev_profit,
                 });
             }

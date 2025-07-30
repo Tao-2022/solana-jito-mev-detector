@@ -1,9 +1,12 @@
+use crate::locale::Language;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Settings {
     pub rpc_url: String,
     pub log_level: String,
+    #[serde(default)]
+    pub language: Language,
     #[serde(default)]
     pub auto_detect_hashes: Vec<String>,
     #[serde(default)]

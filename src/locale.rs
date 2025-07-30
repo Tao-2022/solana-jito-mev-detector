@@ -36,8 +36,8 @@ impl Locale {
 
     pub fn title(&self) -> &'static str {
         match self.lang {
-            Language::English => "🔍 Solana MEV Detector v0.2.0",
-            Language::Chinese => "🔍 Solana MEV 检测器 v0.2.0",
+            Language::English => "🔍 Solana MEV Detector v0.3.0",
+            Language::Chinese => "🔍 Solana MEV 检测器 v0.3.0",
         }
     }
     

@@ -124,8 +124,8 @@ Please enter a Solana transaction hash (or 'exit'/'quit' to close):",
 
     pub fn get_tx_success(&self) -> &'static str {
         match self.lang {
-            Language::English => "Successfully retrieved target transaction info, block: {}",
-            Language::Chinese => "获取目标交易信息成功，区块: {}",
+            Language::English => "Successfully retrieved target transaction info, block: ",
+            Language::Chinese => "获取目标交易信息成功，区块: ",
         }
     }
 
@@ -387,8 +387,8 @@ Please enter a Solana transaction hash (or 'exit'/'quit' to close):",
 
     pub fn sandwich_pattern_detected(&self) -> &'static str {
         match self.lang {
-            Language::English => "Sandwich attack pattern detected, intersection similarity: {:.1}%",
-            Language::Chinese => "检测到三明治攻击模式，交集相似度: {:.1}%",
+            Language::English => "Sandwich attack pattern detected, intersection similarity: ",
+            Language::Chinese => "检测到三明治攻击模式，交集相似度: ",
         }
     }
 

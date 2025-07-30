@@ -190,15 +190,23 @@ async fn analyze_transaction(
                 detector.detect_sandwich_attack(&bundle_transactions, target_signature)
             {
                 println!("{}", locale.sandwich_detected());
-                println!("{} {}", locale.front_tx(), sandwich.front_tx);
-                println!("{} {}", locale.back_tx(), sandwich.back_tx);
+                println!("{}{}", locale.front_tx(), sandwich.front_tx);
+                println!("{}{}", locale.back_tx(), sandwich.back_tx);
                 println!(
                     "{} {}",
                     locale.shared_accounts(),
                     sandwich.account_intersection.len()
                 );
 
-                if let Some(loss) = &sandwich.user_loss {
+                // 只使用精确余额变化分析
+                let precise_loss = detector.calculate_precise_sandwich_loss(
+                    &client,
+                    &sandwich.front_tx,
+                    target_signature,
+                    &sandwich.back_tx,
+                ).await;
+                
+                if let Some(loss) = precise_loss {
                     println!("{}", locale.user_loss_estimation());
                     println!(
                         "{} {:.9} SOL",
@@ -225,6 +233,25 @@ async fn analyze_transaction(
                     
                     let validation_icon = if loss.validation_passed { "✅" } else { "⚠️" };
                     println!("  {} Validation: {}", validation_icon, if loss.validation_passed { "Passed" } else { "Failed" });
+
+                    // 显示具体的代币损失信息（如果可用）
+                    if !loss.token_losses.is_empty() {
+                        println!("\n📊 Token Loss Details:");
+                        for (i, token_loss) in loss.token_losses.iter().enumerate() {
+                            let is_primary = loss.primary_loss_token.as_ref() == Some(&token_loss.token_address);
+                            let primary_indicator = if is_primary { " (Primary)" } else { "" };
+                            
+                            println!(
+                                "  {}. {} {}: {:.9} {}{}", 
+                                i + 1,
+                                token_loss.token_symbol,
+                                "Loss",
+                                token_loss.loss_amount_ui,
+                                token_loss.token_symbol,
+                                primary_indicator
+                            );
+                        }
+                    }
                 } else {
                     println!("{}", locale.cannot_calculate_loss());
                 }

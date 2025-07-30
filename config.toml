@@ -1,13 +1,11 @@
-# Solana RPC URL
-rpc_url = "https://api.mainnet-beta.solana.com"
+# Solana RPC URL 建议使用helis rpc
+rpc_url = "https://mainnet.helius-rpc.com/?api-key="
 
 # Language setting: "en" for English, "zh" for Chinese
 language = "zh"
 
 # 要自动检测的交易哈希列表 (可选，如果为空则不会自动检测)
 auto_detect_hashes = []
-
-
 
 # Default log level ("debug", "info",)
 log_level = "info"
@@ -22,10 +20,10 @@ small_transfer_threshold = 1000000
 
 # 价格影响分析法参数
 [mev_detection.price_impact]
-# 价格影响比例系数 (默认0.01)
+# 价格影响比例系数 - 调整为更符合实际情况 (改进算法中会乘以10倍)
 price_impact_ratio = 0.01
-# 最大损失百分比限制 (默认10.0%)
-max_loss_percentage = 10.0
+# 最大损失百分比限制 - 提高到50%以覆盖更多真实案例
+max_loss_percentage = 50.0
 
 # Token余额变化分析法参数
 [mev_detection.token_balance]

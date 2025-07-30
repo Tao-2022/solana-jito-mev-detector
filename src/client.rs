@@ -286,4 +286,111 @@ impl SolanaClient {
 
         Err(format!("Failed to parse full block or block not found: {}", json).into())
     }
+
+    /// 获取交易的详细信息，包括余额变化
+    pub async fn get_transaction_with_balance_changes(
+        &self,
+        signature: &str,
+    ) -> Result<TransactionWithBalanceChanges, Box<dyn std::error::Error>> {
+        let request_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTransaction",
+            "params": [
+                signature,
+                {
+                    "encoding": "json",
+                    "maxSupportedTransactionVersion": 0,
+                    "commitment": "confirmed"
+                }
+            ]
+        });
+
+        let response = self
+            .client
+            .post(&self.rpc_url)
+            .json(&request_body)
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await?;
+
+        let json: Value = response.json().await?;
+
+        if let Some(result) = json.get("result") {
+            if !result.is_null() {
+                return Ok(serde_json::from_value(result.clone())?);
+            }
+        }
+
+        Err(format!("Transaction not found: {}", signature).into())
+    }
+}
+
+/// 账户余额变化信息
+#[derive(Debug, Clone)]
+pub struct AccountBalanceChange {
+    pub account: String,
+    pub pre_balance: u64,
+    pub post_balance: u64,
+    pub change: i64, // 可以为负数
+}
+
+/// Token余额变化信息
+#[derive(Debug, Clone)]
+pub struct TokenBalanceChange {
+    pub account: String,
+    pub mint: String,
+    pub owner: String,
+    pub pre_amount: u64,
+    pub post_amount: u64,
+    pub change: i64,
+    pub decimals: u8,
+    pub pre_amount_ui: f64,
+    pub post_amount_ui: f64,
+    pub change_ui: f64,
+}
+
+/// 包含余额变化的交易信息
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct TransactionWithBalanceChanges {
+    #[serde(flatten)]
+    pub transaction: Transaction,
+    pub meta: Option<TransactionMeta>,
+}
+
+/// 交易元数据，包含余额变化信息
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct TransactionMeta {
+    pub err: Option<Value>,
+    pub fee: u64,
+    #[serde(rename = "preBalances")]
+    pub pre_balances: Vec<u64>,
+    #[serde(rename = "postBalances")]
+    pub post_balances: Vec<u64>,
+    #[serde(rename = "preTokenBalances", default)]
+    pub pre_token_balances: Vec<TokenBalance>,
+    #[serde(rename = "postTokenBalances", default)]
+    pub post_token_balances: Vec<TokenBalance>,
+}
+
+/// Token余额信息
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct TokenBalance {
+    #[serde(rename = "accountIndex")]
+    pub account_index: usize,
+    pub mint: String,
+    pub owner: Option<String>,
+    #[serde(rename = "uiTokenAmount")]
+    pub ui_token_amount: UiTokenAmount,
+}
+
+/// UI格式的Token金额
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct UiTokenAmount {
+    pub amount: String,
+    pub decimals: u8,
+    #[serde(rename = "uiAmount")]
+    pub ui_amount: Option<f64>,
+    #[serde(rename = "uiAmountString")]
+    pub ui_amount_string: String,
 }

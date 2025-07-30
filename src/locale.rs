@@ -30,7 +30,7 @@ impl Locale {
     pub fn starting(&self) -> &'static str {
         match self.lang {
             Language::English => "Starting Solana MEV Detector...",
-            Language::Chinese => "Solana MEV 检测器启动...",
+            Language::Chinese => "Solana MEV 0.21检测器启动...",
         }
     }
 
@@ -238,15 +238,15 @@ Please enter a Solana transaction hash (or 'exit'/'quit' to close):",
 
     pub fn front_tx(&self) -> &'static str {
         match self.lang {
-            Language::English => "  Front-run transaction: https://solscan.io/tx/{}",
-            Language::Chinese => "  前置交易: https://solscan.io/tx/{}",
+            Language::English => "  Front-run transaction: https://solscan.io/tx/",
+            Language::Chinese => "  前置交易: https://solscan.io/tx/",
         }
     }
 
     pub fn back_tx(&self) -> &'static str {
         match self.lang {
-            Language::English => "  Back-run transaction: https://solscan.io/tx/{}",
-            Language::Chinese => "  后置交易: https://solscan.io/tx/{}",
+            Language::English => "  Back-run transaction: https://solscan.io/tx/",
+            Language::Chinese => "  后置交易: https://solscan.io/tx/",
         }
     }
 
@@ -319,8 +319,8 @@ Please enter a Solana transaction hash (or 'exit'/'quit' to close):",
 
     pub fn frontrun_tx(&self) -> &'static str {
         match self.lang {
-            Language::English => "  Front-run transaction: https://solscan.io/tx/{}",
-            Language::Chinese => "  抢跑交易: https://solscan.io/tx/{}",
+            Language::English => "  Front-run transaction: https://solscan.io/tx/",
+            Language::Chinese => "  抢跑交易: https://solscan.io/tx/",
         }
     }
 
@@ -406,80 +406,4 @@ Please enter a Solana transaction hash (or 'exit'/'quit' to close):",
         }
     }
 
-    pub fn using_price_impact(&self) -> &'static str {
-        match self.lang {
-            Language::English => "Using Price Impact Analysis to calculate loss",
-            Language::Chinese => "使用价格影响分析法计算损失",
-        }
-    }
-
-    pub fn using_token_balance(&self) -> &'static str {
-        match self.lang {
-            Language::English => "Using Token Balance Change Analysis to calculate loss",
-            Language::Chinese => "使用Token余额变化分析法计算损失",
-        }
-    }
-
-    pub fn using_sol_balance(&self) -> &'static str {
-        match self.lang {
-            Language::English => "Using SOL Balance Change Analysis to calculate loss",
-            Language::Chinese => "使用SOL余额变化分析法计算损失",
-        }
-    }
-
-    pub fn using_slippage(&self) -> &'static str {
-        match self.lang {
-            Language::English => "Using Slippage Estimation to calculate loss",
-            Language::Chinese => "使用滑点估算法计算损失",
-        }
-    }
-
-    pub fn front_tx_sol_transfer(&self) -> &'static str {
-        match self.lang {
-            Language::English => "Front-run tx SOL transfer: {} lamports",
-            Language::Chinese => "前置交易SOL转账: {} lamports",
-        }
-    }
-
-    pub fn target_tx_sol_transfer(&self) -> &'static str {
-        match self.lang {
-            Language::English => "Target tx SOL transfer: {} lamports",
-            Language::Chinese => "目标交易SOL转账: {} lamports",
-        }
-    }
-
-    pub fn back_tx_sol_transfer(&self) -> &'static str {
-        match self.lang {
-            Language::English => "Back-run tx SOL transfer: {} lamports",
-            Language::Chinese => "后置交易SOL转账: {} lamports",
-        }
-    }
-    
-    pub fn price_impact_method_name(&self) -> &'static str {
-        match self.lang {
-            Language::English => "Price Impact Analysis",
-            Language::Chinese => "价格影响分析法",
-        }
-    }
-
-    pub fn token_balance_method_name(&self) -> &'static str {
-        match self.lang {
-            Language::English => "Token Balance Change Analysis",
-            Language::Chinese => "Token余额变化分析法",
-        }
-    }
-
-    pub fn sol_balance_method_name(&self) -> &'static str {
-        match self.lang {
-            Language::English => "SOL Balance Change Analysis (Improved)",
-            Language::Chinese => "SOL余额变化分析法(改进版)",
-        }
-    }
-
-    pub fn slippage_method_name(&self) -> &'static str {
-        match self.lang {
-            Language::English => "Slippage Estimation",
-            Language::Chinese => "滑点估算法",
-        }
-    }
 }

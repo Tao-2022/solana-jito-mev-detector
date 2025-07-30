@@ -1,4 +1,5 @@
-use crate::client::Transaction;
+use crate::client::{Transaction, TransactionWithBalanceChanges, 
+                    AccountBalanceChange, TokenBalanceChange, TransactionMeta, TokenBalance};
 use crate::locale::{Language, Locale};
 use crate::settings::MevDetectionConfig;
 use bs58;
@@ -27,40 +28,117 @@ pub struct UserLoss {
     pub loss_percentage: f64,
     pub calculation_method: String,
     pub mev_profit_lamports: u64,
-    pub confidence_score: f64, // 新增：置信度评分 (0.0-1.0)
-    pub validation_passed: bool, // 新增：是否通过验证
+    pub confidence_score: f64,
+    pub validation_passed: bool,
+    pub token_losses: Vec<TokenLossDetail>,
+    pub primary_loss_token: Option<String>,
+}
+
+/// 代币损失详情
+#[derive(Debug, Clone)]
+pub struct TokenLossDetail {
+    pub token_address: String,
+    pub token_symbol: String,
+    pub loss_amount: u64,
+    pub loss_amount_ui: f64,
 }
 
 /// 交易价值分析结果
 #[derive(Debug, Clone)]
 pub struct TradeValue {
-    pub sol_amount: u64,
-    pub instruction_complexity: u64,
-    pub account_complexity: u64,
     pub estimated_total_value: u64,
-    pub confidence: f64, // 估算置信度
 }
 
-/// 代币流动分析结果
+/// 池子信息结构体
 #[derive(Debug, Clone)]
-pub struct TokenFlow {
-    pub net_sol_change: i64, // 净SOL变化（可为负）
+pub struct PoolInfo {
+    pub dex_type: DexType,
+    pub token_a: String,
+    pub token_b: String,
+    pub decimals_a: u8,
+    pub decimals_b: u8,
+}
+
+/// DEX类型枚举
+#[derive(Debug, Clone, PartialEq)]
+pub enum DexType {
+    Raydium,
+    Orca,
+    Jupiter, 
+    PumpFun,
+    Serum,
+    Unknown,
+}
+
+/// 攻击者利润详情
+#[derive(Debug, Clone)]
+pub struct AttackerProfit {
+    pub token_a_profit: i64,
+    pub token_b_profit: i64,
+    pub net_sol_profit: u64,
+    pub confidence: f64,
+}
+
+/// 账户资金流入分析结果
+#[derive(Debug, Clone)]
+pub struct AccountInflowAnalysis {
+    pub total_sol_inflow: u64,
+    pub token_inflows: Vec<TokenFlowDetail>,
+    pub involved_addresses: HashSet<String>,
     pub instruction_count: usize,
-    pub writable_account_count: usize,
-    pub estimated_token_value: u64,
+}
+
+/// 账户资金流出分析结果
+#[derive(Debug, Clone)]
+pub struct AccountOutflowAnalysis {
+    pub total_sol_outflow: u64,
+    pub involved_addresses: HashSet<String>,
+    pub instruction_count: usize,
+}
+
+/// 代币流动详情
+#[derive(Debug, Clone)]
+pub struct TokenFlowDetail {
+    pub token_address: String,
+    pub token_symbol: String,
+    pub amount: u64,
+    pub amount_ui: f64,
+    pub decimals: u8,
+}
+
+/// 系统转账流入信息
+#[derive(Debug, Clone)]
+struct SystemTransferInflow {
+    amount: u64,
+    from_address: String,
+}
+
+/// 综合交易流动分析结果
+#[derive(Debug, Clone)]
+pub struct ComprehensiveFlowAnalysis {
+    pub net_sol_amount: u64,
+    pub token_flows: Vec<TokenFlowDetail>,
+    pub total_instructions: usize,
+    pub dex_complexity_score: f64,
+    pub involved_addresses: HashSet<String>,
+}
+
+/// 系统转账流出信息
+#[derive(Debug, Clone)]
+struct SystemTransferOutflow {
+    amount: u64,
+    to_address: String,
 }
 
 /// 抢跑攻击检测结果
 #[derive(Debug, Clone)]
 pub struct FrontrunDetails {
     pub front_tx: String,
-    pub victim_tx: String,
     pub account_intersection: Vec<String>,
 }
 
 // 程序ID常量定义
 mod program_ids {
-    // 主要 DEX 程序 ID
     pub const RAYDIUM_AMM: &str = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
     pub const RAYDIUM_CLMM: &str = "CAMMCzo5YL8w4VFF8KVHrK22GGUQzGdR1qJRXgKhpNzc";
     pub const ORCA_WHIRLPOOLS: &str = "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc";
@@ -69,12 +147,47 @@ mod program_ids {
     pub const JUPITER: &str = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
     pub const PUMP_FUN: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 
-    // 系统程序 ID
     pub const SYSTEM: &str = "11111111111111111111111111111111";
     pub const MEMO: &str = "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDgQdddcxFr";
+    pub const TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+}
+
+// 常用代币地址和信息
+mod token_info {
+    pub const WSOL: &str = "So11111111111111111111111111111111111111112";
+    pub const USDC: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+    pub const USDT: &str = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
+    pub const RAY: &str = "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R";
+    pub const BONK: &str = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
+    pub const WIF: &str = "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm";
+    
+    pub fn get_token_symbol(address: &str) -> &'static str {
+        match address {
+            WSOL => "WSOL",
+            USDC => "USDC", 
+            USDT => "USDT",
+            RAY => "RAY",
+            BONK => "BONK",
+            WIF => "WIF",
+            _ => "UNKNOWN",
+        }
+    }
+    
+    pub fn get_token_decimals(address: &str) -> u8 {
+        match address {
+            WSOL => 9,
+            USDC => 6,
+            USDT => 6,
+            RAY => 6,
+            BONK => 5,
+            WIF => 6,
+            _ => 9,
+        }
+    }
 }
 
 use program_ids::*;
+use token_info::*;
 
 // Jito 小费账户列表
 const JITO_TIP_ACCOUNTS: [&str; 8] = [
@@ -88,7 +201,6 @@ const JITO_TIP_ACCOUNTS: [&str; 8] = [
     "GGcvCardiohRDPcsyTuyNzTTBEsszS6b6X9dCg12N66X",
 ];
 
-// 允许的简单转账程序
 const ALLOWED_PROGRAMS_FOR_SIMPLE_TRANSFER: [&str; 2] = [SYSTEM, MEMO];
 
 impl MevDetector {
@@ -97,13 +209,7 @@ impl MevDetector {
         Self { config, locale: Locale::new(language) }
     }
 
-    /// 检查交易是否为简单的转账（仅涉及系统程序或Memo程序）
-    ///
-    /// # 参数
-    /// * `tx` - 要检查的交易
-    ///
-    /// # 返回值
-    /// 如果交易仅包含系统程序或Memo程序指令则返回true，否则返回false
+    /// 检查交易是否为简单的转账
     pub fn is_simple_transfer(&self, tx: &Transaction) -> bool {
         tx.transaction.message.instructions.iter().all(|inst| {
             if let Some(program_id) = tx
@@ -119,19 +225,7 @@ impl MevDetector {
         })
     }
 
-    /// 检查目标交易前后交易中是否有Jito小费地址，并返回小费交易的详细信息
-    ///
-    /// # 参数
-    /// * `block_transactions` - 区块中的所有交易
-    /// * `target_index` - 目标交易在区块中的索引
-    ///
-    /// # 返回值
-    /// 返回包含以下信息的元组，如果没有找到Jito小费则返回None:
-    /// * 小费交易索引
-    /// * 小费地址
-    /// * 小费金额
-    /// * 是否在目标交易前面
-    /// * 捆绑包交易列表
+    /// 检查目标交易前后交易中是否有Jito小费地址
     pub fn check_jito_tip_in_nearby_transactions(
         &self,
         block_transactions: &[Transaction],
@@ -143,7 +237,6 @@ impl MevDetector {
             if let Some((tip_account, tip_amount)) = self.check_single_transaction_for_jito_tip(tx)
             {
                 info!("{}", self.locale.jito_tip_found_before());
-                // Jito小费在前面，捆绑该交易+往后4个交易（包含目标交易）
                 let bundle_end = (i + 5).min(block_transactions.len());
                 let bundle_transactions = block_transactions[i..bundle_end].to_vec();
                 return Some((i, tip_account, tip_amount, true, bundle_transactions));
@@ -156,7 +249,6 @@ impl MevDetector {
             if let Some((tip_account, tip_amount)) = self.check_single_transaction_for_jito_tip(tx)
             {
                 info!("{}", self.locale.jito_tip_found_after());
-                // Jito小费在后面，捆绑该交易+往前4个交易（包含目标交易）
                 let bundle_start = i.saturating_sub(4);
                 let bundle_transactions = block_transactions[bundle_start..=i].to_vec();
                 return Some((i, tip_account, tip_amount, false, bundle_transactions));
@@ -167,9 +259,7 @@ impl MevDetector {
     }
 
     /// 检查单个交易是否包含Jito小费
-    /// 返回: (小费地址, 小费金额)
     fn check_single_transaction_for_jito_tip(&self, tx: &Transaction) -> Option<(String, u64)> {
-        // 首先找到所有Jito小费地址在账户列表中的索引
         let jito_tip_indices: Vec<(usize, String)> = tx
             .transaction
             .message
@@ -187,20 +277,16 @@ impl MevDetector {
             return None;
         }
 
-        // 检查每个指令是否包含Jito小费地址的索引
         for instruction in &tx.transaction.message.instructions {
-            // 获取程序ID
             let program_id = tx
                 .transaction
                 .message
                 .account_keys
                 .get(instruction.program_id_index as usize)?;
 
-            // 检查指令的账户索引列表是否包含任何Jito小费地址的索引
             for &account_index in &instruction.accounts {
                 for &(jito_index, ref jito_address) in &jito_tip_indices {
                     if account_index as usize == jito_index {
-                        // 进一步检查是否为系统程序转账指令
                         if program_id == SYSTEM {
                             if let Some(amount) = self.parse_transfer_amount(&instruction.data) {
                                 debug!("{}: {}", self.locale.jito_tip_parsed(), amount);
@@ -221,15 +307,12 @@ impl MevDetector {
 
         let amount = match data.len() {
             12 if data.get(0..4)? == [2, 0, 0, 0] => {
-                // 标准系统程序转账格式
                 u64::from_le_bytes(data.get(4..12)?.try_into().ok()?)
             }
             8 => {
-                // 简化的转账格式 (只包含金额)
                 u64::from_le_bytes(data.as_slice().try_into().ok()?)
             }
             len if len >= 12 => {
-                // 尝试从数据中提取金额
                 u64::from_le_bytes(data.get(4..12)?.try_into().ok()?)
             }
             len if len >= 8 => u64::from_le_bytes(data.get(0..8)?.try_into().ok()?),
@@ -243,14 +326,7 @@ impl MevDetector {
         }
     }
 
-    /// 检测交易列表中是否存在三明治攻击 - 基于账户交集分析
-    ///
-    /// # 参数
-    /// * `transactions` - 交易列表（通常是Jito捆绑包中的交易）
-    /// * `target_signature` - 目标交易的签名
-    ///
-    /// # 返回值
-    /// 如果检测到三明治攻击，返回包含攻击详情和损失估算的结构体，否则返回None
+    /// 检测交易列表中是否存在三明治攻击
     pub fn detect_sandwich_attack(
         &self,
         transactions: &[Transaction],
@@ -261,12 +337,10 @@ impl MevDetector {
             .position(|tx| tx.signature == target_signature)?;
         let target_tx = &transactions[target_index];
 
-        // 检查目标交易是否是DEX交易类型
         if !self.is_dex_transaction(target_tx) {
             return None;
         }
 
-        // 获取目标交易的过滤后账户（排除系统账户、Jito小费账户、小额转账账户）
         let target_accounts = self.extract_filtered_accounts(target_tx);
         if target_accounts.is_empty() {
             return None;
@@ -274,7 +348,6 @@ impl MevDetector {
 
         debug!("Target transaction filtered accounts: {}", target_accounts.len());
 
-        // 寻找前两个交易中与目标交易有账户交集的交易
         let mut front_candidates = Vec::new();
         for i in 0..target_index.min(2) {
             let front_tx = &transactions[target_index.saturating_sub(i + 1)];
@@ -293,7 +366,6 @@ impl MevDetector {
             }
         }
 
-        // 寻找后两个交易中与目标交易有账户交集的交易
         let mut back_candidates = Vec::new();
         for i in 0..2.min(transactions.len() - target_index - 1) {
             let back_tx = &transactions[target_index + i + 1];
@@ -312,23 +384,18 @@ impl MevDetector {
             }
         }
 
-        // 检查前后交易是否有相等的账户交集（三明治攻击特征）
         for (front_tx, front_intersection) in &front_candidates {
             for (back_tx, back_intersection) in &back_candidates {
-                // 检查前后交易的账户交集是否相当（表示与同一个池子交互）
                 let intersection_similarity =
                     self.calculate_intersection_similarity(front_intersection, back_intersection);
 
                 if intersection_similarity >= self.config.similarity_threshold {
-                    // 达到配置的相似度阈值认为是同一个池子
-                    //
                     info!(
                         "{} {:.1}%",
                         self.locale.sandwich_pattern_detected(),
                         intersection_similarity * 100.0
                     );
 
-                    // 合并前后交易的账户交集作为最终交集
                     let mut combined_intersection = front_intersection.clone();
                     for account in back_intersection {
                         if !combined_intersection.contains(account) {
@@ -336,20 +403,11 @@ impl MevDetector {
                         }
                     }
 
-                    // 计算用户损失
-                    let user_loss = self.calculate_sandwich_loss(
-                        transactions,
-                        target_index,
-                        &front_tx.signature,
-                        &back_tx.signature,
-                        &combined_intersection,
-                    );
-
                     return Some(SandwichDetails {
                         front_tx: front_tx.signature.clone(),
                         back_tx: back_tx.signature.clone(),
                         account_intersection: combined_intersection,
-                        user_loss,
+                        user_loss: None, // 不再在此处计算用户损失，只在精确分析中计算
                     });
                 }
             }
@@ -358,14 +416,7 @@ impl MevDetector {
         None
     }
 
-    /// 检测交易列表中是否存在抢跑攻击 - 基于账户交集分析
-    ///
-    /// # 参数
-    /// * `transactions` - 交易列表（通常是Jito捆绑包中的交易）
-    /// * `target_signature` - 目标交易的签名
-    ///
-    /// # 返回值
-    /// 如果检测到抢跑攻击，返回包含攻击详情的结构体，否则返回None
+    /// 检测交易列表中是否存在抢跑攻击
     pub fn detect_frontrun_attack(
         &self,
         transactions: &[Transaction],
@@ -376,12 +427,10 @@ impl MevDetector {
             .position(|tx| tx.signature == target_signature)?;
         let target_tx = &transactions[target_index];
 
-        // 检查目标交易是否是DEX交易类型
         if !self.is_dex_transaction(target_tx) {
             return None;
         }
 
-        // 获取目标交易的过滤后账户
         let target_accounts = self.extract_filtered_accounts(target_tx);
         if target_accounts.is_empty() {
             return None;
@@ -392,31 +441,25 @@ impl MevDetector {
             target_accounts.len()
         );
 
-        // 在目标交易前面的几个交易中寻找抢跑攻击
         for i in (0..target_index).rev() {
             let potential_frontrun = &transactions[i];
 
-            // 检查是否是DEX交易类型
             if !self.is_dex_transaction(potential_frontrun) {
                 continue;
             }
 
-            // 获取潜在抢跑交易的过滤后账户
             let frontrun_accounts = self.extract_filtered_accounts(potential_frontrun);
 
-            // 计算账户交集
             let intersection: Vec<String> = target_accounts
                 .intersection(&frontrun_accounts)
                 .cloned()
                 .collect();
 
-            // 如果存在账户交集，则判定为抢跑攻击
             if !intersection.is_empty() {
                 info!("{} {}", self.locale.frontrun_pattern_detected(), intersection.len());
 
                 return Some(FrontrunDetails {
                     front_tx: potential_frontrun.signature.clone(),
-                    victim_tx: target_tx.signature.clone(),
                     account_intersection: intersection,
                 });
             }
@@ -425,12 +468,10 @@ impl MevDetector {
         None
     }
 
-    /// 提取交易中的过滤后账户（只提取可写账户，排除Jito小费账户、小额转账账户）
+    /// 提取交易中的过滤后账户
     fn extract_filtered_accounts(&self, tx: &Transaction) -> HashSet<String> {
         let mut filtered_accounts = HashSet::new();
 
-        // 直接检查账户的可写性，不依赖外部client
-        // 获取所有指令中的可写账户
         for instruction in &tx.transaction.message.instructions {
             if let Some(program_id) = tx
                 .transaction
@@ -438,13 +479,12 @@ impl MevDetector {
                 .account_keys
                 .get(instruction.program_id_index as usize)
             {
-                // 对于系统程序指令，检查是否为小额转账
                 if program_id == SYSTEM {
                     if self.is_small_transfer_instruction(
                         instruction,
                         &tx.transaction.message.account_keys,
                     ) {
-                        continue; // 跳过小额转账账户
+                        continue;
                     }
                 }
 
@@ -452,12 +492,10 @@ impl MevDetector {
                     if let Some(account) =
                         tx.transaction.message.account_keys.get(acc_index as usize)
                     {
-                        // 检查账户是否可写
                         if !self.is_account_writable(acc_index as usize, &tx.transaction.message) {
-                            continue; // 跳过只读账户
+                            continue;
                         }
 
-                        // 排除Jito小费账户
                         if JITO_TIP_ACCOUNTS.contains(&account.as_str()) {
                             continue;
                         }
@@ -468,11 +506,8 @@ impl MevDetector {
             }
         }
 
-        // 额外过滤：确保账户地址有效
         filtered_accounts.retain(|account| {
-            // 移除看起来像程序派生地址的长账户（超过44字符的通常是错误或特殊账户）
             account.len() <= 44 &&
-            // 确保是有效的base58字符
             account.chars().all(|c| "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz".contains(c))
         });
 
@@ -486,35 +521,25 @@ impl MevDetector {
             let num_readonly_signed_accounts = header.num_readonly_signed_accounts as usize;
             let num_readonly_unsigned_accounts = header.num_readonly_unsigned_accounts as usize;
 
-            // Solana账户排序：
-            // 1. 需要签名的可写账户 (0 to num_required_signatures - num_readonly_signed_accounts - 1)
-            // 2. 需要签名的只读账户 (num_required_signatures - num_readonly_signed_accounts to num_required_signatures - 1)
-            // 3. 不需要签名的可写账户 (num_required_signatures to account_keys.len() - num_readonly_unsigned_accounts - 1)
-            // 4. 不需要签名的只读账户 (account_keys.len() - num_readonly_unsigned_accounts to account_keys.len() - 1)
-
             if account_index < num_required_signatures {
-                // 需要签名的账户
                 account_index < (num_required_signatures - num_readonly_signed_accounts)
             } else {
-                // 不需要签名的账户
                 let unsigned_start = num_required_signatures;
                 let readonly_unsigned_start =
                     message.account_keys.len() - num_readonly_unsigned_accounts;
                 account_index >= unsigned_start && account_index < readonly_unsigned_start
             }
         } else {
-            // 如果没有header信息，无法判断，默认认为都可写（保守处理）
             true
         }
     }
 
-    /// 检查指令是否为小额转账（小于0.001 SOL）
+    /// 检查指令是否为小额转账
     fn is_small_transfer_instruction(
         &self,
         instruction: &crate::client::Instruction,
         account_keys: &[String],
     ) -> bool {
-        // 只检查系统程序转账指令
         if let Some(program_id) = account_keys.get(instruction.program_id_index as usize) {
             if program_id != SYSTEM {
                 return false;
@@ -523,16 +548,12 @@ impl MevDetector {
             return false;
         }
 
-        // 解析指令数据获取转账金额
         if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
             let amount = if data.len() == 12 && data[0..4] == [2, 0, 0, 0] {
-                // 标准系统程序转账格式
                 u64::from_le_bytes(data[4..12].try_into().unwrap_or([0; 8]))
             } else if data.len() == 8 {
-                // 简化的转账格式 (只包含金额)
                 u64::from_le_bytes(data.try_into().unwrap_or([0; 8]))
             } else if data.len() >= 12 {
-                // 尝试从数据中提取金额
                 u64::from_le_bytes(data[4..12].try_into().unwrap_or([0; 8]))
             } else {
                 0
@@ -567,9 +588,8 @@ impl MevDetector {
         }
     }
 
-    /// 检查交易是否为DEX交易 - 改进版本，不仅依赖程序ID
+    /// 检查交易是否为DEX交易
     fn is_dex_transaction(&self, tx: &Transaction) -> bool {
-        // 首先检查已知的DEX程序
         const DEX_PROGRAMS: [&str; 7] = [
             RAYDIUM_AMM,
             RAYDIUM_CLMM,
@@ -597,24 +617,15 @@ impl MevDetector {
             return true;
         }
 
-        // 如果没有已知DEX程序，通过账户特征判断是否为交易
         self.is_likely_swap_transaction(tx)
     }
 
     /// 通过账户特征判断是否可能是swap交易
     fn is_likely_swap_transaction(&self, tx: &Transaction) -> bool {
-        // 检查交易特征：
-        // 1. 账户数量较多（swap通常涉及多个账户）
-        // 2. 有多个指令
-        // 3. 不是简单的系统程序交易
-
         let account_count = tx.transaction.message.account_keys.len();
-        let _instruction_count = tx.transaction.message.instructions.len();
 
-        // swap交易通常涉及至少配置的最小账户数量（用户钱包、token账户、池子账户、程序等）
         let has_multiple_accounts = account_count >= self.config.trade_size.min_swap_accounts;
 
-        // 检查是否有非系统程序的指令
         let has_non_system_instructions = tx.transaction.message.instructions.iter().any(|inst| {
             if let Some(program_id) = tx
                 .transaction
@@ -628,7 +639,6 @@ impl MevDetector {
             }
         });
 
-        // 检查是否有token相关的账户特征
         let has_token_accounts = self.has_token_account_patterns(tx);
 
         has_multiple_accounts && has_non_system_instructions && has_token_accounts
@@ -636,835 +646,684 @@ impl MevDetector {
 
     /// 检查是否有token账户的特征
     fn has_token_account_patterns(&self, tx: &Transaction) -> bool {
-        // 检查账户地址的特征，token账户通常是base58编码的44字符长度
         let typical_token_account_count = tx
             .transaction
             .message
             .account_keys
             .iter()
-            .filter(|key| key.len() == 44) // 典型的Solana账户地址长度
+            .filter(|key| key.len() == 44)
             .count();
 
-        // 如果有多个典型长度的账户，可能是token相关交易
         typical_token_account_count >= 4
     }
 
-    /// 计算三明治攻击中的用户损失
-    /// 通过多种方法分析MEV攻击对用户造成的实际损失
-    fn calculate_sandwich_loss(
-        &self,
-        transactions: &[Transaction],
-        target_index: usize,
-        front_tx_sig: &str,
-        back_tx_sig: &str,
-        shared_accounts: &[String],
-    ) -> Option<UserLoss> {
-        debug!("{}", self.locale.calculating_sandwich_loss());
 
-        // 获取三笔交易
-        let target_tx = &transactions[target_index];
-        let front_tx = transactions
-            .iter()
-            .find(|tx| tx.signature == front_tx_sig)?;
-        let back_tx = transactions.iter().find(|tx| tx.signature == back_tx_sig)?;
-
-        // 改进的多方法分析，收集所有可能的结果
-        let mut possible_losses = Vec::new();
-
-        // 方法1: 改进的价格影响分析法
-        if let Some(loss) = self.analyze_price_impact_loss_v2(front_tx, target_tx, back_tx, shared_accounts) {
-            possible_losses.push(loss);
-        }
-
-        // 方法2: 改进的代币流动分析法
-        if let Some(loss) = self.analyze_token_flow_loss(front_tx, target_tx, back_tx, shared_accounts) {
-            possible_losses.push(loss);
-        }
-
-        // 方法3: 改进的攻击者利润分析法
-        if let Some(loss) = self.analyze_attacker_profit_loss(front_tx, target_tx, back_tx) {
-            possible_losses.push(loss);
-        }
-
-        // 方法4: 保守的滑点估算法
-        let conservative_loss = self.estimate_conservative_slippage_loss(target_tx, shared_accounts);
-        possible_losses.push(conservative_loss);
-
-        // 选择最佳结果（基于置信度和验证）
-        self.select_best_loss_estimation(possible_losses)
-    }
-
-    /// 改进的价格影响分析法 V2
-    fn analyze_price_impact_loss_v2(
-        &self,
-        front_tx: &Transaction,
-        target_tx: &Transaction,
-        back_tx: &Transaction,
-        shared_accounts: &[String],
-    ) -> Option<UserLoss> {
-        if shared_accounts.is_empty() {
-            return None;
-        }
-
-        let target_value = self.analyze_trade_value(target_tx);
-        let front_value = self.analyze_trade_value(front_tx);
-        let back_value = self.analyze_trade_value(back_tx);
-
-        if target_value.estimated_total_value == 0 {
-            return None;
-        }
-
-        // 改进的价格影响计算
-        let market_impact_ratio = self.calculate_market_impact_ratio(&front_value, &target_value, shared_accounts);
-        let estimated_loss = (target_value.estimated_total_value as f64 * market_impact_ratio) as u64;
-
-        // 改进的MEV利润计算：基于净收益而非交易规模
-        let mev_profit = self.calculate_net_mev_profit(&front_value, &back_value);
-
-        if estimated_loss > 0 {
-            let loss_percentage = (estimated_loss as f64 / target_value.estimated_total_value as f64) * 100.0;
-            let confidence = self.calculate_loss_confidence(&target_value, &front_value, &back_value, shared_accounts);
-            let validation_passed = self.validate_loss_calculation(estimated_loss, mev_profit, target_value.estimated_total_value);
-
-            Some(UserLoss {
-                estimated_loss_lamports: estimated_loss,
-                loss_percentage: loss_percentage.min(self.config.price_impact.max_loss_percentage),
-                calculation_method: self.locale.price_impact_method_name().to_string(),
-                mev_profit_lamports: mev_profit,
-                confidence_score: confidence,
-                validation_passed,
-            })
-        } else {
-            None
-        }
-    }
-
-    /// 改进的代币流动分析法
-    fn analyze_token_flow_loss(
-        &self,
-        front_tx: &Transaction,
-        target_tx: &Transaction,
-        back_tx: &Transaction,
-        shared_accounts: &[String],
-    ) -> Option<UserLoss> {
-        let target_flow = self.analyze_token_flow(target_tx);
-        let front_flow = self.analyze_token_flow(front_tx);  
-        let back_flow = self.analyze_token_flow(back_tx);
-
-        if target_flow.estimated_token_value == 0 {
-            return None;
-        }
-
-        // 基于流动性影响计算损失
-        let liquidity_impact = self.calculate_liquidity_impact(&front_flow, &target_flow, shared_accounts);
-        let estimated_loss = (target_flow.estimated_token_value as f64 * liquidity_impact) as u64;
-
-        // 基于净流动计算MEV利润
-        let mev_profit = self.calculate_flow_based_profit(&front_flow, &back_flow);
-
-        if estimated_loss > 0 {
-            let loss_percentage = (estimated_loss as f64 / target_flow.estimated_token_value as f64) * 100.0;
-            let confidence = 0.7; // 代币流动分析的基础置信度
-            let validation_passed = self.validate_loss_calculation(estimated_loss, mev_profit, target_flow.estimated_token_value);
-
-            Some(UserLoss {
-                estimated_loss_lamports: estimated_loss,
-                loss_percentage: loss_percentage.min(self.config.token_balance.max_loss_percentage),
-                calculation_method: self.locale.token_balance_method_name().to_string(),
-                mev_profit_lamports: mev_profit,
-                confidence_score: confidence,
-                validation_passed,
-            })
-        } else {
-            None
-        }
-    }
-
-    /// 改进的攻击者利润分析法
-    fn analyze_attacker_profit_loss(
-        &self,
-        front_tx: &Transaction,
-        target_tx: &Transaction,
-        back_tx: &Transaction,
-    ) -> Option<UserLoss> {
-        let attacker_addresses = self.identify_potential_attackers(front_tx, back_tx)?;
-        let target_value = self.analyze_trade_value(target_tx);
-        
-        if target_value.estimated_total_value == 0 {
-            return None;
-        }
-
-        // 基于攻击者实际收益计算
-        let gross_profit = self.calculate_attacker_gross_profit(front_tx, back_tx, &attacker_addresses);
-        let transaction_costs = self.estimate_transaction_costs(front_tx, back_tx);
-        let net_profit = gross_profit.saturating_sub(transaction_costs);
-
-        if net_profit > 0 {
-            // 用户损失 = 攻击者净利润 * 分配比例
-            let user_loss_ratio = self.calculate_user_loss_ratio(target_value.estimated_total_value, gross_profit);
-            let estimated_loss = (net_profit as f64 * user_loss_ratio) as u64;
-            
-            let loss_percentage = (estimated_loss as f64 / target_value.estimated_total_value as f64) * 100.0;
-            let confidence = 0.8; // 基于实际利润的分析置信度较高
-            let validation_passed = self.validate_loss_calculation(estimated_loss, net_profit, target_value.estimated_total_value);
-
-            Some(UserLoss {
-                estimated_loss_lamports: estimated_loss,
-                loss_percentage: loss_percentage.min(self.config.sol_balance.max_loss_percentage),
-                calculation_method: self.locale.sol_balance_method_name().to_string(),
-                mev_profit_lamports: net_profit,
-                confidence_score: confidence,
-                validation_passed,
-            })
-        } else {
-            None
-        }
-    }
-
-    /// 保守的滑点估算法（作为兜底方案）
-    fn estimate_conservative_slippage_loss(
-        &self,
-        target_tx: &Transaction,
-        shared_accounts: &[String],
-    ) -> UserLoss {
-        let target_value = self.analyze_trade_value(target_tx);
-        let base_slippage = self.config.slippage.base_slippage;
-        
-        // 更保守的滑点计算
-        let complexity_adjustment = 1.0 + (shared_accounts.len() as f64 * 0.1);
-        let instruction_adjustment = 1.0 + (target_tx.transaction.message.instructions.len() as f64 * 0.05);
-        
-        let conservative_slippage = base_slippage * complexity_adjustment * instruction_adjustment * 0.5; // 更保守
-        let estimated_loss = (target_value.estimated_total_value as f64 * conservative_slippage) as u64;
-
-        let validation_passed = estimated_loss <= target_value.estimated_total_value / 10; // 不超过10%
-
-        UserLoss {
-            estimated_loss_lamports: estimated_loss,
-            loss_percentage: (conservative_slippage * 100.0).min(self.config.slippage.max_loss_percentage),
-            calculation_method: self.locale.slippage_method_name().to_string(),
-            mev_profit_lamports: estimated_loss, // 保守估算：假设等于用户损失
-            confidence_score: 0.5, // 保守估算的置信度较低
-            validation_passed,
-        }
-    }
-
-    /// 方法1: 价格影响分析法 - 通过分析池子状态变化计算损失
-    fn analyze_price_impact_loss(
-        &self,
-        front_tx: &Transaction,
-        target_tx: &Transaction,
-        back_tx: &Transaction,
-        shared_accounts: &[String],
-    ) -> Option<UserLoss> {
-        if shared_accounts.is_empty() {
-            return None;
-        }
-
-        // 分析用户交易的规模
-        let user_trade_size = self.estimate_trade_size(target_tx);
-        if user_trade_size == 0 {
-            return None;
-        }
-
-        // 计算攻击者通过前后交易造成的价格影响
-        let front_impact = self.estimate_trade_size(front_tx);
-        let back_impact = self.estimate_trade_size(back_tx);
-
-        if front_impact > 0 && back_impact > 0 {
-            // 计算由于价格影响导致的用户损失
-            // 损失 = 用户交易规模 × 价格影响百分比
-            let price_impact_ratio = (front_impact as f64
-                / (front_impact + user_trade_size) as f64)
-                * self.config.price_impact.price_impact_ratio;
-            let estimated_loss = (user_trade_size as f64 * price_impact_ratio) as u64;
-
-            // 计算MEV攻击者的净利润
-            let mev_profit = back_impact.saturating_sub(front_impact);
-
-            if estimated_loss > 0 {
-                let loss_percentage = (estimated_loss as f64 / user_trade_size as f64) * 100.0;
-
-                return Some(UserLoss {
-                    estimated_loss_lamports: estimated_loss,
-                    loss_percentage: loss_percentage
-                        .min(self.config.price_impact.max_loss_percentage),
-                    calculation_method: self.locale.price_impact_method_name().to_string(),
-                    mev_profit_lamports: mev_profit,
-                    confidence_score: 0.6, // 旧方法的默认置信度
-                    validation_passed: self.validate_loss_calculation(estimated_loss, mev_profit, user_trade_size),
-                });
+    
+    
+    /// 解析代币转账金额
+    fn parse_token_transfer_amount(&self, instruction_data: &str) -> Option<u64> {
+        if let Ok(data) = bs58::decode(instruction_data).into_vec() {
+            if data.len() >= 9 && data[0] == 3 { // SPL Token Transfer instruction
+                if let Ok(amount_bytes) = data[1..9].try_into() {
+                    return Some(u64::from_le_bytes(amount_bytes));
+                }
             }
         }
-
         None
     }
-
-    /// 方法2: Token余额变化分析法 - 分析用户实际损失的token数量
-    fn analyze_token_balance_changes(
-        &self,
-        front_tx: &Transaction,
-        target_tx: &Transaction,
-        back_tx: &Transaction,
-        shared_accounts: &[String],
-    ) -> Option<UserLoss> {
-        // 估算用户的交易规模
-        let user_trade_size = self.estimate_trade_size(target_tx);
-        if user_trade_size == 0 {
-            return None;
-        }
-
-        // 分析共享账户数量 - 更多共享账户表示更大的市场影响
-        let market_impact_factor = (shared_accounts.len() as f64).sqrt();
-
-        // 计算攻击者的交易规模
-        let attacker_front_size = self.estimate_trade_size(front_tx);
-        let attacker_back_size = self.estimate_trade_size(back_tx);
-
-        if attacker_front_size > 0 && attacker_back_size > 0 {
-            // 计算相对交易规模影响
-            let relative_impact =
-                attacker_front_size as f64 / (attacker_front_size + user_trade_size) as f64;
-
-            // 估算用户损失 = 交易规模 × 相对影响 × 市场影响因子
-            let estimated_loss = (user_trade_size as f64
-                * relative_impact
-                * market_impact_factor
-                * self.config.token_balance.loss_coefficient)
-                as u64;
-
-            // MEV攻击者利润估算
-            let mev_profit = (attacker_back_size as f64 * 0.8) as u64;
-
-            if estimated_loss > 0 {
-                let loss_percentage = (estimated_loss as f64 / user_trade_size as f64) * 100.0;
-
-                return Some(UserLoss {
-                    estimated_loss_lamports: estimated_loss,
-                    loss_percentage: loss_percentage
-                        .min(self.config.token_balance.max_loss_percentage),
-                    calculation_method: self.locale.token_balance_method_name().to_string(),
-                    mev_profit_lamports: mev_profit,
-                    confidence_score: 0.5, // 旧方法的默认置信度
-                    validation_passed: self.validate_loss_calculation(estimated_loss, mev_profit, user_trade_size),
-                });
-            }
-        }
-
-        None
-    }
-
-    /// 方法4: 滑点估算法 - 基于交易规模和市场深度
-    fn estimate_slippage_loss(
-        &self,
-        target_tx: &Transaction,
-        shared_accounts: &[String],
-    ) -> UserLoss {
-        let user_trade_size = self.estimate_trade_size(target_tx);
-        let instruction_count = target_tx.transaction.message.instructions.len();
-
-        // 基础滑点估算
-        let base_slippage = self.config.slippage.base_slippage;
-
-        // 根据共享账户数量调整 (更多共享账户意味着更复杂的交易)
-        let complexity_factor =
-            1.0 + (shared_accounts.len() as f64 * self.config.slippage.complexity_factor);
-
-        // 根据指令数量调整
-        let instruction_factor =
-            1.0 + (instruction_count as f64 * self.config.slippage.instruction_factor);
-
-        // 计算最终滑点
-        let final_slippage = base_slippage * complexity_factor * instruction_factor;
-        let estimated_loss = (user_trade_size as f64 * final_slippage) as u64;
-
-        UserLoss {
-            estimated_loss_lamports: estimated_loss,
-            loss_percentage: (final_slippage * 100.0).min(self.config.slippage.max_loss_percentage),
-            calculation_method: self.locale.slippage_method_name().to_string(),
-            mev_profit_lamports: estimated_loss, // 假设MEV利润等于用户损失
-            confidence_score: 0.3, // 旧滑点方法的置信度较低
-            validation_passed: self.validate_loss_calculation(estimated_loss, estimated_loss, user_trade_size),
-        }
-    }
-
-    /// 改进的交易价值分析 - 更准确的估算方法
-    fn analyze_trade_value(&self, tx: &Transaction) -> TradeValue {
-        // 方法1: SOL转账金额分析
-        let sol_amount = self.extract_sol_transfer_amount(tx);
+    /// 计算交易向指定账户的资金流入量
+    fn calculate_account_inflow(&self, tx: &Transaction, target_accounts: &[String]) -> AccountInflowAnalysis {
+        let mut total_sol_inflow = 0u64;
+        let mut token_inflows = Vec::new();
+        let mut involved_addresses = HashSet::new();
         
-        // 方法2: 指令复杂度分析（权重调整）
-        let instruction_count = tx.transaction.message.instructions.len();
-        let instruction_complexity = self.calculate_instruction_complexity(tx);
+        debug!("开始分析资金流入到目标账户:");
+        debug!("目标账户: {:?}", target_accounts);
         
-        // 方法3: 账户复杂度分析（只计算可写账户）
-        let writable_accounts = self.count_writable_accounts(tx);
-        let account_complexity = writable_accounts as u64 * self.config.trade_size.account_factor_value;
-        
-        // 方法4: 基于交易模式的价值估算
-        let pattern_value = self.estimate_value_by_pattern(tx);
-        
-        // 综合评估
-        let base_value = sol_amount + instruction_complexity + account_complexity + pattern_value;
-        let estimated_total_value = base_value.max(self.config.trade_size.min_trade_size);
-        
-        // 计算置信度
-        let confidence = self.calculate_value_confidence(sol_amount, instruction_count, writable_accounts);
-        
-        TradeValue {
-            sol_amount,
-            instruction_complexity,
-            account_complexity,
-            estimated_total_value,
-            confidence,
-        }
-    }
-
-    /// 计算指令复杂度（改进版）
-    fn calculate_instruction_complexity(&self, tx: &Transaction) -> u64 {
-        let mut complexity = 0u64;
-        
-        for instruction in &tx.transaction.message.instructions {
+        for (i, instruction) in tx.transaction.message.instructions.iter().enumerate() {
             if let Some(program_id) = tx.transaction.message.account_keys.get(instruction.program_id_index as usize) {
-                // 根据程序类型给予不同权重
-                let weight = match program_id.as_str() {
-                    // DEX程序权重更高
-                    RAYDIUM_AMM | RAYDIUM_CLMM | ORCA_WHIRLPOOLS | ORCA_V1 => 3.0,
-                    JUPITER | SERUM_DEX => 2.5,
-                    PUMP_FUN => 2.0,
-                    SYSTEM => 0.5, // 系统程序权重较低
-                    _ => 1.0, // 其他程序默认权重
-                };
+                debug!("分析指令{}: {}", i + 1, program_id);
                 
-                complexity += (self.config.trade_size.instruction_complexity_value as f64 * weight) as u64;
-            }
-        }
-        
-        complexity
-    }
-
-    /// 计算可写账户数量
-    fn count_writable_accounts(&self, tx: &Transaction) -> usize {
-        let total_accounts = tx.transaction.message.account_keys.len();
-        let mut writable_count = 0;
-        
-        for i in 0..total_accounts {
-            if self.is_account_writable(i, &tx.transaction.message) {
-                writable_count += 1;
-            }
-        }
-        
-        writable_count
-    }
-
-    /// 基于交易模式估算价值
-    fn estimate_value_by_pattern(&self, tx: &Transaction) -> u64 {
-        let account_count = tx.transaction.message.account_keys.len();
-        let instruction_count = tx.transaction.message.instructions.len();
-        
-        // 根据交易模式特征评估
-        if account_count >= 15 && instruction_count >= 3 {
-            // 复杂交易模式（可能是大额swap）
-            self.config.trade_size.min_trade_size * 5
-        } else if account_count >= 10 && instruction_count >= 2 {
-            // 中等复杂度交易
-            self.config.trade_size.min_trade_size * 2
-        } else if account_count >= 6 {
-            // 简单swap交易
-            self.config.trade_size.min_trade_size
-        } else {
-            // 很可能不是swap交易
-            0
-        }
-    }
-
-    /// 计算价值估算的置信度
-    fn calculate_value_confidence(&self, sol_amount: u64, instruction_count: usize, writable_accounts: usize) -> f64 {
-        let mut confidence = 0.0;
-        
-        // SOL金额置信度（30%权重）
-        if sol_amount > self.config.small_transfer_threshold {
-            confidence += 0.3 * (sol_amount as f64 / (self.config.trade_size.min_trade_size as f64 * 10.0)).min(1.0);
-        }
-        
-        // 指令数量置信度（25%权重）
-        confidence += 0.25 * ((instruction_count as f64 / 5.0).min(1.0));
-        
-        // 可写账户置信度（25%权重）
-        confidence += 0.25 * ((writable_accounts as f64 / 10.0).min(1.0));
-        
-        // 基础置信度（20%权重） - 如果是识别的DEX交易
-        // 注意：这里需要一个tx参数，但为了简化，我们先跳过DEX检查
-        confidence += 0.2; // 给予基础置信度
-        
-        confidence.min(1.0)
-    }
-
-    /// 保持向后兼容的简化接口
-    fn estimate_trade_size(&self, tx: &Transaction) -> u64 {
-        self.analyze_trade_value(tx).estimated_total_value
-    }
-
-    /// 分析SOL余额变化来估算损失 (兜底方法)
-    fn analyze_sol_balance_changes(
-        &self,
-        front_tx: &Transaction,
-        target_tx: &Transaction,
-        back_tx: &Transaction,
-    ) -> Option<UserLoss> {
-        // 查找攻击者账户 (在前后交易中都出现的签名账户)
-        let front_signers: HashSet<&String> = front_tx
-            .transaction
-            .message
-            .account_keys
-            .iter()
-            .take(
-                front_tx
-                    .transaction
-                    .message
-                    .header
-                    .as_ref()?
-                    .num_required_signatures as usize,
-            )
-            .collect();
-        let back_signers: HashSet<&String> = back_tx
-            .transaction
-            .message
-            .account_keys
-            .iter()
-            .take(
-                back_tx
-                    .transaction
-                    .message
-                    .header
-                    .as_ref()?
-                    .num_required_signatures as usize,
-            )
-            .collect();
-
-        // 找到共同的签名者 (可能是攻击者)
-        let common_signers: Vec<&String> =
-            front_signers.intersection(&back_signers).cloned().collect();
-
-        if !common_signers.is_empty() {
-            // 分析前后交易中的SOL转账金额
-            let front_sol_amount = self.extract_sol_transfer_amount(front_tx);
-            let back_sol_amount = self.extract_sol_transfer_amount(back_tx);
-            let target_sol_amount = self.extract_sol_transfer_amount(target_tx);
-
-            debug!("{} {}", self.locale.front_tx_sol_transfer(), front_sol_amount);
-            debug!("{} {}", self.locale.target_tx_sol_transfer(), target_sol_amount);
-            debug!("{} {}", self.locale.back_tx_sol_transfer(), back_sol_amount);
-
-            // 估算MEV利润 = 后置交易收益 - 前置交易成本
-            let mev_profit = back_sol_amount.saturating_sub(front_sol_amount);
-
-            if mev_profit > 0 {
-                // 改进的损失计算：基于交易规模的比例
-                let user_trade_size = target_sol_amount.max(self.estimate_trade_size(target_tx));
-                let estimated_loss = if user_trade_size > 0 {
-                    // 损失 = MEV利润 × (用户交易规模 / 总交易规模) × 影响因子
-                    let total_volume = front_sol_amount + user_trade_size + back_sol_amount;
-                    let user_ratio = user_trade_size as f64 / total_volume as f64;
-                    (mev_profit as f64 * user_ratio * self.config.sol_balance.impact_factor) as u64
-                } else {
-                    (mev_profit as f64 * self.config.sol_balance.conservative_ratio) as u64
-                    // 保守估算
-                };
-
-                let loss_percentage = if user_trade_size > 0 {
-                    (estimated_loss as f64 / user_trade_size as f64) * 100.0
-                } else {
-                    1.0 // 默认1%
-                };
-
-                return Some(UserLoss {
-                    estimated_loss_lamports: estimated_loss,
-                    loss_percentage: loss_percentage
-                        .min(self.config.sol_balance.max_loss_percentage),
-                    calculation_method: self.locale.sol_balance_method_name().to_string(),
-                    mev_profit_lamports: mev_profit,
-                    confidence_score: 0.4, // 旧SOL余额方法的置信度
-                    validation_passed: self.validate_loss_calculation(estimated_loss, mev_profit, user_trade_size),
-                });
-            }
-        }
-
-        None
-    }
-
-    /// 提取交易中的SOL转账金额
-    fn extract_sol_transfer_amount(&self, tx: &Transaction) -> u64 {
-        let mut total_amount = 0u64;
-
-        for instruction in &tx.transaction.message.instructions {
-            // 检查是否为系统程序转账指令
-            if let Some(program_id) = tx
-                .transaction
-                .message
-                .account_keys
-                .get(instruction.program_id_index as usize)
-            {
-                if program_id == SYSTEM {
-                    if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
-                        let amount = if data.len() == 12 && data[0..4] == [2, 0, 0, 0] {
-                            // 标准系统程序转账格式
-                            u64::from_le_bytes(data[4..12].try_into().unwrap_or([0; 8]))
-                        } else if data.len() == 8 {
-                            // 简化的转账格式
-                            u64::from_le_bytes(data.try_into().unwrap_or([0; 8]))
-                        } else if data.len() >= 12 {
-                            // 尝试从数据中提取金额
-                            u64::from_le_bytes(data[4..12].try_into().unwrap_or([0; 8]))
-                        } else {
-                            0
-                        };
-
-                        if amount > self.config.small_transfer_threshold {
-                            total_amount += amount;
+                match program_id.as_str() {
+                    SYSTEM => {
+                        if let Some(inflow) = self.analyze_system_transfer_inflow(instruction, &tx.transaction.message.account_keys, target_accounts) {
+                            debug!("  发现System转账流入: {:.9} SOL, 来源: {}", inflow.amount as f64 / 1_000_000_000.0, inflow.from_address);
+                            total_sol_inflow += inflow.amount;
+                            involved_addresses.insert(inflow.from_address.clone());
+                        }
+                    },
+                    TOKEN_PROGRAM_ID => {
+                        if let Some(token_inflow) = self.analyze_token_transfer_inflow(instruction, &tx.transaction.message.account_keys, target_accounts) {
+                            debug!("  发现Token转账流入: {:.9} {}", token_inflow.amount_ui, token_inflow.token_symbol);
+                            if token_inflow.token_address == WSOL {
+                                total_sol_inflow += token_inflow.amount;
+                            } else {
+                                token_inflows.push(token_inflow);
+                            }
+                        }
+                    },
+                    _ => {
+                        if let Some(dex_inflow) = self.analyze_dex_program_inflow(instruction, &tx.transaction.message.account_keys, target_accounts, program_id) {
+                            debug!("  DEX程序估算流入: {:.9} SOL", dex_inflow as f64 / 1_000_000_000.0);
+                            total_sol_inflow += dex_inflow;
                         }
                     }
                 }
             }
         }
-
-        total_amount
+        
+        debug!("资金流入分析完成 - 总SOL流入: {:.9} SOL, 代币流入种类: {}", 
+               total_sol_inflow as f64 / 1_000_000_000.0, token_inflows.len());
+        
+        AccountInflowAnalysis {
+            total_sol_inflow,
+            token_inflows,
+            involved_addresses,
+            instruction_count: tx.transaction.message.instructions.len(),
+        }
+    }
+    
+        /// 计算交易从指定账户的资金流出量
+    fn calculate_account_outflow(&self, tx: &Transaction, target_accounts: &[String]) -> AccountOutflowAnalysis {
+        let mut total_sol_outflow = 0u64;
+        let mut involved_addresses = HashSet::new();
+        
+        debug!("开始分析资金从目标账户流出:");
+        debug!("目标账户: {:?}", target_accounts);
+        
+        for (i, instruction) in tx.transaction.message.instructions.iter().enumerate() {
+            if let Some(program_id) = tx.transaction.message.account_keys.get(instruction.program_id_index as usize) {
+                debug!("分析指令{}: {}", i + 1, program_id);
+                
+                match program_id.as_str() {
+                    SYSTEM => {
+                        if let Some(outflow) = self.analyze_system_transfer_outflow(instruction, &tx.transaction.message.account_keys, target_accounts) {
+                            debug!("  发现System转账流出: {:.9} SOL, 目标: {}", outflow.amount as f64 / 1_000_000_000.0, outflow.to_address);
+                            total_sol_outflow += outflow.amount;
+                            involved_addresses.insert(outflow.to_address.clone());
+                        }
+                    },
+                    TOKEN_PROGRAM_ID => {
+                        if let Some(token_outflow) = self.analyze_token_transfer_outflow(instruction, &tx.transaction.message.account_keys, target_accounts) {
+                            debug!("  发现Token转账流出: {:.9} {}", token_outflow.amount_ui, token_outflow.token_symbol);
+                            if token_outflow.token_address == WSOL {
+                                total_sol_outflow += token_outflow.amount;
+                            }
+                        }
+                    },
+                    _ => {
+                        if let Some(dex_outflow) = self.analyze_dex_program_outflow(instruction, &tx.transaction.message.account_keys, target_accounts, program_id) {
+                            debug!("  DEX程序估算流出: {:.9} SOL", dex_outflow as f64 / 1_000_000_000.0);
+                            total_sol_outflow += dex_outflow;
+                        }
+                    }
+                }
+            }
+        }
+        
+        debug!("资金流出分析完成 - 总SOL流出: {:.9} SOL", total_sol_outflow as f64 / 1_000_000_000.0);
+        
+        AccountOutflowAnalysis {
+            total_sol_outflow,
+            involved_addresses,
+            instruction_count: tx.transaction.message.instructions.len(),
+        }
     }
 
-    // =============================================================================
-    // 新增的辅助方法
-    // =============================================================================
-
-    /// 选择最佳的损失估算结果
-    fn select_best_loss_estimation(&self, possible_losses: Vec<UserLoss>) -> Option<UserLoss> {
-        if possible_losses.is_empty() {
+    fn analyze_system_transfer_inflow(
+        &self,
+        instruction: &crate::client::Instruction,
+        account_keys: &[String],
+        target_accounts: &[String],
+    ) -> Option<SystemTransferInflow> {
+        if instruction.accounts.len() < 2 {
             return None;
         }
-
-        // 优先选择通过验证且置信度最高的结果
-        let validated_losses: Vec<&UserLoss> = possible_losses
-            .iter()
-            .filter(|loss| loss.validation_passed)
-            .collect();
-
-        let best_loss = if !validated_losses.is_empty() {
-            // 在通过验证的结果中选择置信度最高的
-            validated_losses
-                .into_iter()
-                .max_by(|a, b| a.confidence_score.partial_cmp(&b.confidence_score).unwrap())?
-        } else {
-            // 如果没有通过验证的结果，选择置信度最高的
-            possible_losses
-                .iter()
-                .max_by(|a, b| a.confidence_score.partial_cmp(&b.confidence_score).unwrap())?
-        };
-
-        Some(best_loss.clone())
-    }
-
-    /// 分析代币流动
-    fn analyze_token_flow(&self, tx: &Transaction) -> TokenFlow {
-        let sol_transfers = self.extract_sol_transfer_amount(tx) as i64;
-        let net_sol_change = sol_transfers; // 简化：假设SOL转出为负，转入为正
         
-        let instruction_count = tx.transaction.message.instructions.len();
-        let writable_account_count = self.count_writable_accounts(tx);
+        let from_account = account_keys.get(instruction.accounts[0] as usize)?;
+        let to_account = account_keys.get(instruction.accounts[1] as usize)?;
         
-        // 基于交易复杂度估算代币价值
-        let estimated_token_value = self.analyze_trade_value(tx).estimated_total_value;
-
-        TokenFlow {
-            net_sol_change,
-            instruction_count,
-            writable_account_count,
-            estimated_token_value,
+        if target_accounts.contains(to_account) {
+            if let Some(amount) = self.parse_transfer_amount(&instruction.data) {
+                return Some(SystemTransferInflow {
+                    amount,
+                    from_address: from_account.clone(),
+                });
+            }
         }
-    }
-
-    /// 计算市场影响比例
-    fn calculate_market_impact_ratio(&self, front_value: &TradeValue, target_value: &TradeValue, shared_accounts: &[String]) -> f64 {
-        if target_value.estimated_total_value == 0 {
-            return 0.0;
-        }
-
-        // 基于攻击者交易规模相对于用户交易规模的比例
-        let size_ratio = front_value.estimated_total_value as f64 / (front_value.estimated_total_value + target_value.estimated_total_value) as f64;
         
-        // 基于共享账户数量的影响调整
-        let account_impact = (shared_accounts.len() as f64).sqrt() * 0.01;
-        
-        // 综合影响比例
-        (size_ratio * self.config.price_impact.price_impact_ratio + account_impact).min(0.1) // 最大10%影响
+        None
     }
-
-    /// 计算净MEV利润
-    fn calculate_net_mev_profit(&self, front_value: &TradeValue, back_value: &TradeValue) -> u64 {
-        // 简化计算：假设后置交易的80%是利润，减去前置交易成本
-        let gross_profit = (back_value.sol_amount as f64 * 0.8) as u64;
-        let front_cost = front_value.sol_amount;
-        
-        gross_profit.saturating_sub(front_cost)
-    }
-
-    /// 计算流动性影响
-    fn calculate_liquidity_impact(&self, front_flow: &TokenFlow, target_flow: &TokenFlow, shared_accounts: &[String]) -> f64 {
-        if target_flow.estimated_token_value == 0 {
-            return 0.0;
-        }
-
-        // 基于攻击者对市场流动性的影响
-        let liquidity_ratio = front_flow.estimated_token_value as f64 / (front_flow.estimated_token_value + target_flow.estimated_token_value) as f64;
-        
-        // 基于共享账户的复杂度调整
-        let complexity_factor = (shared_accounts.len() as f64 / 10.0).min(1.0);
-        
-        (liquidity_ratio * self.config.token_balance.loss_coefficient * complexity_factor).min(0.05) // 最大5%
-    }
-
-    /// 基于流动计算MEV利润
-    fn calculate_flow_based_profit(&self, front_flow: &TokenFlow, back_flow: &TokenFlow) -> u64 {
-        // 基于净SOL变化计算利润
-        let net_change = back_flow.net_sol_change - front_flow.net_sol_change;
-        if net_change > 0 {
-            net_change as u64
-        } else {
-            0
-        }
-    }
-
-    /// 识别潜在攻击者地址
-    fn identify_potential_attackers(&self, front_tx: &Transaction, back_tx: &Transaction) -> Option<Vec<String>> {
-        // 改进的攻击者识别：基于签名者和资金流动模式
-        let front_signers: HashSet<&String> = front_tx
-            .transaction
-            .message
-            .account_keys
-            .iter()
-            .take(
-                front_tx
-                    .transaction
-                    .message
-                    .header
-                    .as_ref()?
-                    .num_required_signatures as usize,
-            )
-            .collect();
-            
-        let back_signers: HashSet<&String> = back_tx
-            .transaction  
-            .message
-            .account_keys
-            .iter()
-            .take(
-                back_tx
-                    .transaction
-                    .message  
-                    .header
-                    .as_ref()?
-                    .num_required_signatures as usize,
-            )
-            .collect();
-
-        let common_signers: Vec<String> = front_signers
-            .intersection(&back_signers)
-            .map(|s| (*s).clone())
-            .collect();
-
-        if common_signers.is_empty() {
-            None
-        } else {
-            Some(common_signers)
-        }
-    }
-
-    /// 计算攻击者总利润
-    fn calculate_attacker_gross_profit(&self, front_tx: &Transaction, back_tx: &Transaction, _attacker_addresses: &[String]) -> u64 { 
-        // 简化实现：基于SOL转账金额差
-        let back_amount = self.extract_sol_transfer_amount(back_tx);
-        let front_amount = self.extract_sol_transfer_amount(front_tx);
-        
-        back_amount.saturating_sub(front_amount)
-    }
-
-    /// 估算交易成本
-    fn estimate_transaction_costs(&self, front_tx: &Transaction, back_tx: &Transaction) -> u64 {
-        // 估算gas费用 (每个交易大约5000 lamports)
-        let base_fee_per_tx = 5_000u64;
-        let front_instructions = front_tx.transaction.message.instructions.len() as u64;
-        let back_instructions = back_tx.transaction.message.instructions.len() as u64;
-        
-        // 基础费用 + 指令复杂度费用
-        (base_fee_per_tx * 2) + ((front_instructions + back_instructions) * 1_000)
-    }
-
-    /// 计算用户损失比例
-    fn calculate_user_loss_ratio(&self, user_trade_value: u64, attacker_gross_profit: u64) -> f64 {
-        if attacker_gross_profit == 0 {
-            return 0.0;
-        }
-
-        // 用户损失通常是攻击者利润的一部分，比例基于交易规模
-        let total_volume = user_trade_value + attacker_gross_profit;
-        let user_ratio = user_trade_value as f64 / total_volume as f64;
-        
-        // 用户承担的损失比例在30%-70%之间
-        (user_ratio * 0.7).max(0.3).min(0.7)
-    }
-
-    /// 计算损失估算的置信度
-    fn calculate_loss_confidence(
+    
+    /// 分析系统程序转账的流出情况
+    fn analyze_system_transfer_outflow(
         &self,
-        target_value: &TradeValue,
-        front_value: &TradeValue,
-        back_value: &TradeValue,
-        shared_accounts: &[String],
-    ) -> f64 {
-        let mut confidence = 0.0;
-
-        // 交易价值置信度（40%权重）
-        confidence += 0.4 * ((target_value.confidence + front_value.confidence + back_value.confidence) / 3.0);
-
-        // 共享账户数量置信度（30%权重）
-        let account_confidence = (shared_accounts.len() as f64 / 10.0).min(1.0);
-        confidence += 0.3 * account_confidence;
-
-        // 交易规模合理性（20%权重）
-        let size_reasonableness = if target_value.estimated_total_value > 0 {
-            ((front_value.estimated_total_value + back_value.estimated_total_value) as f64 
-             / target_value.estimated_total_value as f64).min(10.0) / 10.0
+        instruction: &crate::client::Instruction,
+        account_keys: &[String],
+        target_accounts: &[String],
+    ) -> Option<SystemTransferOutflow> {
+        if instruction.accounts.len() < 2 {
+            return None;
+        }
+        
+        let from_account = account_keys.get(instruction.accounts[0] as usize)?;
+        let to_account = account_keys.get(instruction.accounts[1] as usize)?;
+        
+        if target_accounts.contains(from_account) {
+            if let Some(amount) = self.parse_transfer_amount(&instruction.data) {
+                return Some(SystemTransferOutflow {
+                    amount,
+                    to_address: to_account.clone(),
+                });
+            }
+        }
+        
+        None
+    }
+    
+    /// 分析SPL Token转账的流入情况
+    fn analyze_token_transfer_inflow(
+        &self,
+        instruction: &crate::client::Instruction,
+        account_keys: &[String],
+        target_accounts: &[String],
+    ) -> Option<TokenFlowDetail> {
+        if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
+            if data.len() >= 9 && data[0] == 3 {
+                if let Ok(amount_bytes) = data[1..9].try_into() {
+                    let amount = u64::from_le_bytes(amount_bytes);
+                    
+                    if instruction.accounts.len() >= 3 {
+                        let _source_account = account_keys.get(instruction.accounts[0] as usize)?;
+                        let dest_account = account_keys.get(instruction.accounts[1] as usize)?;
+                        
+                        if target_accounts.contains(dest_account) {
+                            let token_address = self.infer_token_mint_from_accounts(account_keys).unwrap_or_else(|| WSOL.to_string());
+                            
+                            return Some(TokenFlowDetail {
+                                token_address: token_address.clone(),
+                                token_symbol: get_token_symbol(&token_address).to_string(),
+                                amount,
+                                amount_ui: self.convert_token_amount_to_ui(amount, get_token_decimals(&token_address)),
+                                decimals: get_token_decimals(&token_address),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        
+        None
+    }
+    
+    /// 分析SPL Token转账的流出情况
+    fn analyze_token_transfer_outflow(
+        &self,
+        instruction: &crate::client::Instruction,
+        account_keys: &[String],
+        target_accounts: &[String],
+    ) -> Option<TokenFlowDetail> {
+        if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
+            if data.len() >= 9 && data[0] == 3 {
+                if let Ok(amount_bytes) = data[1..9].try_into() {
+                    let amount = u64::from_le_bytes(amount_bytes);
+                    
+                    if instruction.accounts.len() >= 3 {
+                        let source_account = account_keys.get(instruction.accounts[0] as usize)?;
+                        let _dest_account = account_keys.get(instruction.accounts[1] as usize)?;
+                        
+                        if target_accounts.contains(source_account) {
+                            let token_address = self.infer_token_mint_from_accounts(account_keys).unwrap_or_else(|| WSOL.to_string());
+                            
+                            return Some(TokenFlowDetail {
+                                token_address: token_address.clone(),
+                                token_symbol: get_token_symbol(&token_address).to_string(),
+                                amount,
+                                amount_ui: self.convert_token_amount_to_ui(amount, get_token_decimals(&token_address)),
+                                decimals: get_token_decimals(&token_address),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        
+        None
+    }
+    
+    /// 分析DEX程序的资金流入（简化实现）
+    fn analyze_dex_program_inflow(
+        &self,
+        instruction: &crate::client::Instruction,
+        _account_keys: &[String],
+        _target_accounts: &[String],
+        program_id: &str,
+    ) -> Option<u64> {
+        let complexity_factor = match program_id {
+            RAYDIUM_AMM | RAYDIUM_CLMM => 2.0,
+            ORCA_WHIRLPOOLS | ORCA_V1 => 1.8,
+            JUPITER => 1.5,
+            _ => 1.0,
+        };
+        
+        let base_estimation = instruction.accounts.len() as u64 * 1_000_000;
+        Some((base_estimation as f64 * complexity_factor) as u64)
+    }
+    
+    /// 分析DEX程序的资金流出（简化实现）
+    fn analyze_dex_program_outflow(
+        &self,
+        instruction: &crate::client::Instruction,
+        account_keys: &[String],
+        target_accounts: &[String],
+        program_id: &str,
+    ) -> Option<u64> {
+        self.analyze_dex_program_inflow(instruction, account_keys, target_accounts, program_id)
+    }
+    
+    /// 从账户列表中推断代币mint地址
+    fn infer_token_mint_from_accounts(&self, account_keys: &[String]) -> Option<String> {
+        let common_tokens = [WSOL, USDC, USDT, RAY, BONK, WIF];
+        for account in account_keys {
+            if common_tokens.contains(&account.as_str()) {
+                return Some(account.clone());
+            }
+        }
+        
+        None
+    }
+    
+    /// 基于复杂度估算损失（当无法直接计算攻击者利润时）
+    fn estimate_loss_from_complexity(
+        &self,
+        front_inflow: &AccountInflowAnalysis,
+        back_outflow: &AccountOutflowAnalysis,
+        user_trade_value: u64,
+    ) -> u64 {
+        let complexity_score = (front_inflow.instruction_count + back_outflow.instruction_count) as u64;
+        let flow_volume = front_inflow.total_sol_inflow + back_outflow.total_sol_outflow;
+        
+        let base_loss_rate = 0.001 + (complexity_score as f64 / 20.0) * 0.004;
+        let volume_factor = if flow_volume > 0 { (flow_volume as f64 / user_trade_value as f64).min(1.0) } else { 0.1 };
+        
+        let estimated_loss = (user_trade_value as f64 * base_loss_rate * volume_factor) as u64;
+        estimated_loss.max(1_000_000)
+    }
+    
+    /// 创建详细的代币损失信息
+    fn create_detailed_token_losses(
+        &self,
+        front_inflow: &AccountInflowAnalysis,
+        total_estimated_loss: u64,
+    ) -> Vec<TokenLossDetail> {
+        let mut losses = Vec::new();
+        
+        if total_estimated_loss > 0 {
+            losses.push(TokenLossDetail {
+                token_address: WSOL.to_string(),
+                token_symbol: "SOL".to_string(),
+                loss_amount: total_estimated_loss,
+                loss_amount_ui: total_estimated_loss as f64 / 1_000_000_000.0,
+            });
+        }
+        
+        for token_inflow in &front_inflow.token_inflows {
+            if token_inflow.token_address != WSOL {
+                let token_loss = (token_inflow.amount as f64 * 0.02) as u64;
+                if token_loss > 0 {
+                    losses.push(TokenLossDetail {
+                        token_address: token_inflow.token_address.clone(),
+                        token_symbol: token_inflow.token_symbol.clone(),
+                        loss_amount: token_loss,
+                        loss_amount_ui: token_inflow.amount_ui * 0.02,
+                    });
+                }
+            }
+        }
+        
+        losses
+    }
+    
+    /// 基于真实余额变化的精确损失计算（新方法）
+    pub async fn calculate_precise_sandwich_loss(
+        &self,
+        client: &crate::client::SolanaClient,
+        front_tx_sig: &str,
+        target_tx_sig: &str,
+        back_tx_sig: &str,
+    ) -> Option<UserLoss> {
+        debug!("开始尝试使用余额变化进行精确损失计算");
+        
+        // 尝试获取三个交易的详细余额变化信息
+        let front_tx_result = client.get_transaction_with_balance_changes(front_tx_sig).await;
+        let target_tx_result = client.get_transaction_with_balance_changes(target_tx_sig).await;
+        let back_tx_result = client.get_transaction_with_balance_changes(back_tx_sig).await;
+        
+        // 检查是否所有交易都能获取到余额变化数据
+        if let (Ok(front_tx), Ok(target_tx), Ok(back_tx)) = 
+            (front_tx_result, target_tx_result, back_tx_result) {
+            
+            debug!("成功获取所有交易的余额变化数据，使用精确分析");
+            return self.perform_precise_analysis(&front_tx, &target_tx, &back_tx);
+        }
+        
+        debug!("无法获取完整的余额变化数据（可能是历史交易），回退到改进的估算方法");
+        None
+    }
+    
+    /// 执行精确的余额变化分析
+    fn perform_precise_analysis(
+        &self,
+        front_tx: &TransactionWithBalanceChanges,
+        target_tx: &TransactionWithBalanceChanges,
+        back_tx: &TransactionWithBalanceChanges,
+    ) -> Option<UserLoss> {
+        // 分析前置交易的真实流入
+        let front_inflow = self.analyze_precise_inflow(front_tx);
+        debug!("前置交易精确分析 - SOL流入: {:.9} SOL, Token流入数量: {}", 
+               front_inflow.total_sol_inflow as f64 / 1_000_000_000.0, 
+               front_inflow.token_inflows.len());
+        
+        // 分析后置交易的真实流出  
+        let back_outflow = self.analyze_precise_outflow(back_tx);
+        debug!("后置交易精确分析 - SOL流出: {:.9} SOL", 
+               back_outflow.total_sol_outflow as f64 / 1_000_000_000.0);
+        
+        // 分析用户交易的真实价值
+        let user_trade_value = self.analyze_precise_trade_value(target_tx);
+        debug!("用户交易精确价值: {:.9} SOL", user_trade_value as f64 / 1_000_000_000.0);
+        
+        // 计算攻击者净利润
+        let attacker_net_profit = back_outflow.total_sol_outflow.saturating_sub(front_inflow.total_sol_inflow);
+        debug!("攻击者精确净利润: {:.9} SOL", attacker_net_profit as f64 / 1_000_000_000.0);
+        
+        // 基于真实数据计算用户损失
+        let estimated_user_loss = if attacker_net_profit > 0 && user_trade_value > 0 {
+            // 使用攻击者利润的85-95%作为用户损失的保守估计
+            (attacker_net_profit as f64 * 0.90) as u64
+        } else {
+            // 如果无法从攻击者利润推算，使用交易价值的滑点估算
+            (user_trade_value as f64 * 0.005) as u64 // 0.5%的滑点损失
+        };
+        
+        let loss_percentage = if user_trade_value > 0 {
+            (estimated_user_loss as f64 / user_trade_value as f64) * 100.0
         } else {
             0.0
         };
-        confidence += 0.2 * size_reasonableness;
-
-        // 基础置信度（10%权重）
-        confidence += 0.1;
-
-        confidence.min(1.0)
+        
+        // 创建详细的代币损失信息
+        let token_losses = self.create_precise_token_losses(&front_inflow, estimated_user_loss);
+        
+        // 计算置信度（基于真实数据的置信度更高）
+        let confidence_score = self.calculate_precise_confidence(
+            &front_inflow, &back_outflow, attacker_net_profit, user_trade_value
+        );
+        
+        // 验证结果
+        let validation_passed = self.validate_precise_result(
+            estimated_user_loss, attacker_net_profit, user_trade_value
+        );
+        
+        // 识别主要损失代币
+        let primary_loss_token = self.identify_primary_loss_token(&token_losses);
+        
+        if estimated_user_loss > 1000 { // 至少0.000001 SOL才认为有损失
+            Some(UserLoss {
+                estimated_loss_lamports: estimated_user_loss,
+                loss_percentage: loss_percentage.min(15.0), // 最大损失15%
+                calculation_method: "精确余额变化分析法".to_string(),
+                mev_profit_lamports: attacker_net_profit,
+                confidence_score,
+                validation_passed,
+                token_losses,
+                primary_loss_token,
+            })
+        } else {
+            None
+        }
     }
-
-    /// 验证损失计算的合理性
-    fn validate_loss_calculation(&self, estimated_loss: u64, mev_profit: u64, user_trade_value: u64) -> bool {
-        // 验证条件1: 损失不能超过用户交易价值的20%
-        if estimated_loss > user_trade_value / 5 {
+    
+    /// 分析交易的精确流入（基于余额变化）
+    fn analyze_precise_inflow(&self, tx: &TransactionWithBalanceChanges) -> PreciseInflowAnalysis {
+        let mut total_sol_inflow = 0u64;
+        let mut token_inflows = Vec::new();
+        
+        if let Some(meta) = &tx.meta {
+            // 分析SOL余额变化
+            for (i, (&pre_balance, &post_balance)) in meta.pre_balances.iter()
+                .zip(meta.post_balances.iter()).enumerate() {
+                
+                if post_balance > pre_balance {
+                    let inflow = post_balance - pre_balance;
+                    total_sol_inflow += inflow;
+                    debug!("账户{}SOL流入: {:.9} SOL", 
+                           i, inflow as f64 / 1_000_000_000.0);
+                }
+            }
+            
+            // 分析Token余额变化
+            for post_token in &meta.post_token_balances {
+                if let Some(pre_token) = meta.pre_token_balances.iter()
+                    .find(|pre| pre.account_index == post_token.account_index && pre.mint == post_token.mint) {
+                    
+                    let pre_amount = pre_token.ui_token_amount.amount.parse::<u64>().unwrap_or(0);
+                    let post_amount = post_token.ui_token_amount.amount.parse::<u64>().unwrap_or(0);
+                    
+                    if post_amount > pre_amount {
+                        let inflow_amount = post_amount - pre_amount;
+                        let ui_inflow = post_token.ui_token_amount.ui_amount.unwrap_or(0.0) -
+                                       pre_token.ui_token_amount.ui_amount.unwrap_or(0.0);
+                        
+                        token_inflows.push(TokenFlowDetail {
+                            token_address: post_token.mint.clone(),
+                            token_symbol: get_token_symbol(&post_token.mint).to_string(),
+                            amount: inflow_amount,
+                            amount_ui: ui_inflow.abs(),
+                            decimals: post_token.ui_token_amount.decimals,
+                        });
+                        
+                        debug!("Token {}流入: {:.6} {}", 
+                               post_token.mint, ui_inflow, get_token_symbol(&post_token.mint));
+                    }
+                }
+            }
+        }
+        
+        PreciseInflowAnalysis {
+            total_sol_inflow,
+            token_inflows,
+        }
+    }
+    
+    /// 分析交易的精确流出（基于余额变化）
+    fn analyze_precise_outflow(&self, tx: &TransactionWithBalanceChanges) -> PreciseOutflowAnalysis {
+        let mut total_sol_outflow = 0u64;
+        
+        if let Some(meta) = &tx.meta {
+            // 分析SOL余额变化
+            for (i, (&pre_balance, &post_balance)) in meta.pre_balances.iter()
+                .zip(meta.post_balances.iter()).enumerate() {
+                
+                if pre_balance > post_balance {
+                    let outflow = pre_balance - post_balance;
+                    total_sol_outflow += outflow;
+                    debug!("账户{}SOL流出: {:.9} SOL", 
+                           i, outflow as f64 / 1_000_000_000.0);
+                }
+            }
+        }
+        
+        PreciseOutflowAnalysis {
+            total_sol_outflow,
+        }
+    }
+    
+    /// 分析交易的精确价值（基于余额变化）
+    fn analyze_precise_trade_value(&self, tx: &TransactionWithBalanceChanges) -> u64 {
+        let mut total_value = 0u64;
+        
+        if let Some(meta) = &tx.meta {
+            // 统计所有SOL变化（进出）
+            for (&pre_balance, &post_balance) in meta.pre_balances.iter()
+                .zip(meta.post_balances.iter()) {
+                
+                let change = if post_balance > pre_balance {
+                    post_balance - pre_balance
+                } else {
+                    pre_balance - post_balance
+                };
+                total_value += change;
+            }
+            
+            // 对于swap交易，交易价值通常是SOL变化量的一半（买入的金额）
+            total_value = total_value / 2;
+        }
+        
+        total_value.max(1_000_000) // 最小0.001 SOL
+    }
+    
+    /// 创建基于精确分析的代币损失详情
+    fn create_precise_token_losses(&self, _inflow: &PreciseInflowAnalysis, estimated_loss: u64) -> Vec<TokenLossDetail> {
+        let mut losses = Vec::new();
+        
+        // 添加SOL损失
+        if estimated_loss > 0 {
+            losses.push(TokenLossDetail {
+                token_address: WSOL.to_string(),
+                token_symbol: "SOL".to_string(),
+                loss_amount: estimated_loss,
+                loss_amount_ui: estimated_loss as f64 / 1_000_000_000.0,
+            });
+        }
+        
+        losses
+    }
+    
+    /// 计算基于精确数据的置信度
+    fn calculate_precise_confidence(
+        &self,
+        _front_inflow: &PreciseInflowAnalysis,
+        _back_outflow: &PreciseOutflowAnalysis, 
+        attacker_profit: u64,
+        user_trade_value: u64,
+    ) -> f64 {
+        let mut confidence: f64 = 0.7; // 基础置信度更高，因为使用了真实余额数据
+        
+        // 有明确的攻击者利润
+        if attacker_profit > 1_000_000 { // > 0.001 SOL
+            confidence += 0.2;
+        }
+        
+        // 用户交易价值合理
+        if user_trade_value > 100_000_000 && user_trade_value < 1_000_000_000_000 { // 0.1-1000 SOL
+            confidence += 0.1;
+        }
+        
+        confidence.min(0.95) // 最高95%置信度
+    }
+    
+    /// 验证精确分析结果
+    fn validate_precise_result(&self, user_loss: u64, attacker_profit: u64, user_trade_value: u64) -> bool {
+        // 用户损失不应超过交易价值的20%
+        if user_trade_value > 0 && (user_loss as f64 / user_trade_value as f64) > 0.20 {
             return false;
         }
-
-        // 验证条件2: 损失不能为0（如果有MEV攻击应该有损失）
-        if estimated_loss == 0 && mev_profit > 0 {
+        
+        // 用户损失应该与攻击者利润相关
+        if attacker_profit > 0 && user_loss > attacker_profit * 2 {
             return false;
         }
-
-        // 验证条件3: MEV利润应该大于等于用户损失（攻击者不会亏本）
-        if mev_profit > 0 && estimated_loss > mev_profit * 2 {
-            return false;
-        }
-
-        // 验证条件4: 损失金额应该在合理范围内（不少于1000 lamports）
-        if estimated_loss > 0 && estimated_loss < 1_000 {
-            return false;
-        }
-
+        
         true
     }
+    
+    /// 计算交集账户损失的置信度
+    fn calculate_intersection_loss_confidence(
+        &self,
+        front_inflow: &AccountInflowAnalysis,
+        back_outflow: &AccountOutflowAnalysis,
+        attacker_net_profit: u64,
+        user_trade_value: u64,
+    ) -> f64 {
+        let mut confidence = 0.0;
+        
+        if front_inflow.total_sol_inflow > 0 && back_outflow.total_sol_outflow > 0 {
+            confidence += 0.3;
+        } else if front_inflow.total_sol_inflow > 0 || back_outflow.total_sol_outflow > 0 {
+            confidence += 0.15;
+        }
+        
+        if attacker_net_profit > 0 {
+            let profit_ratio = attacker_net_profit as f64 / user_trade_value as f64;
+            if profit_ratio >= 0.001 && profit_ratio <= 0.1 {
+                confidence += 0.25;
+            } else if profit_ratio > 0.0 {
+                confidence += 0.15;
+            }
+        }
+        
+        let total_instructions = front_inflow.instruction_count + back_outflow.instruction_count;
+        confidence += 0.2 * (total_instructions as f64 / 10.0).min(1.0);
+        
+        let address_overlap = front_inflow.involved_addresses.intersection(&back_outflow.involved_addresses).count();
+        confidence += 0.15 * (address_overlap as f64 / 3.0).min(1.0);
+        
+        confidence += 0.1;
+        
+        confidence.min(1.0)
+    }
+    
+    /// 验证交集账户损失结果的合理性
+    fn validate_intersection_loss_result(
+        &self,
+        estimated_loss: u64,
+        attacker_profit: u64,
+        user_trade_value: u64,
+    ) -> bool {
+        if estimated_loss > user_trade_value / 6 {
+            return false;
+        }
+        
+        if attacker_profit > 0 && estimated_loss > attacker_profit * 3 / 2 {
+            return false;
+        }
+        
+        if estimated_loss < 100_000 {
+            return false;
+        }
+        
+        if estimated_loss > 100_000_000_000 {
+            return false;
+        }
+        
+        true
+    }
+
+
+    /// 识别主要损失代币
+    fn identify_primary_loss_token(&self, token_losses: &[TokenLossDetail]) -> Option<String> {
+        token_losses.iter()
+            .max_by(|a, b| a.loss_amount.cmp(&b.loss_amount))
+            .map(|loss| loss.token_address.clone())
+    }
+
+    /// 将代币数量转换为UI显示格式
+    fn convert_token_amount_to_ui(&self, amount: u64, decimals: u8) -> f64 {
+        amount as f64 / 10_u64.pow(decimals as u32) as f64
+    }
+    
+}
+
+/// 精确流入分析结果（基于余额变化）
+#[derive(Debug, Clone)]
+pub struct PreciseInflowAnalysis {
+    pub total_sol_inflow: u64,
+    pub token_inflows: Vec<TokenFlowDetail>,
+}
+
+/// 精确流出分析结果（基于余额变化）
+#[derive(Debug, Clone)]
+pub struct PreciseOutflowAnalysis {
+    pub total_sol_outflow: u64,
 }

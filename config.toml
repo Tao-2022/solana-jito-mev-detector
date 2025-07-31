@@ -1,5 +1,5 @@
 # Solana RPC URL 建议使用helis rpc
-rpc_url = "https://mainnet.helius-rpc.com/?api-key="
+rpc_url = "https://mainnet.helius-rpc.com/?api-key=4c370af7-15b6-4f48-8506-6fdb1a75bd8b"
 
 # Language setting: "en" for English, "zh" for Chinese
 language = "zh"
@@ -17,4 +17,8 @@ similarity_threshold = 0.5
 
 # 小额转账阈值 (lamports，默认1,000,000 = 0.001 SOL)
 small_transfer_threshold = 1000000
+
+# 忽略Jito功能 (默认false) - 开启后不查询Jito API，不检查Jito小费，直接基于账户重合分析MEV
+# 通用查询方式，适用于验证者/leader作恶的场景，此时交易不在Jito束包中且没有Jito小费
+ignore_jito = false
 

@@ -43,6 +43,40 @@ pub struct TokenLossDetail {
     pub token_symbol: String,
     pub loss_amount: u64,
     pub loss_amount_ui: f64,
+    pub equivalent_amount: Option<f64>, // 等价的另一个代币数量
+    pub equivalent_symbol: Option<String>, // 另一个代币的符号
+}
+
+/// Jito束包信息
+#[derive(Debug, Clone)]
+pub struct JitoBundleInfo {
+    pub bundle_id: String,
+    pub landed_tip_lamports: u64,
+    pub transactions: Vec<String>, // 束包内所有交易签名
+}
+
+/// Jito API返回的束包交易信息
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct JitoBundleTransaction {
+    pub bundle_id: String,
+}
+
+/// Jito API返回的束包详情
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct JitoBundleDetail {
+    #[serde(rename = "landedTipLamports")]
+    pub landed_tip_lamports: u64,
+    pub transactions: Vec<String>, // 束包内所有交易签名
+}
+
+/// 束包内交易位置分析
+#[derive(Debug, Clone)]
+pub struct BundlePositionAnalysis {
+    pub target_position: usize,      // 目标交易在束包中的位置
+    pub total_transactions: usize,   // 束包内总交易数
+    pub is_sandwiched: bool,         // 是否被夹在中间
+    pub front_transactions: Vec<String>, // 前置交易
+    pub back_transactions: Vec<String>,  // 后置交易
 }
 
 
@@ -184,12 +218,15 @@ impl MevDetector {
         })
     }
 
-    /// 检查目标交易前后交易中是否有Jito小费地址
-    pub fn check_jito_tip_in_nearby_transactions(
+    /// 检查目标交易前后交易中是否有Jito小费地址（传统方法）
+    pub async fn check_jito_tip_in_nearby_transactions(
         &self,
         block_transactions: &[Transaction],
         target_index: usize,
+        target_signature: &str,
     ) -> Option<(usize, String, u64, bool, Vec<Transaction>)> {
+        // 传统方法：直接在附近交易中搜索Jito小费
+        
         // 先检查目标交易前面的交易
         for i in (0..target_index).rev() {
             let tx = &block_transactions[i];
@@ -214,6 +251,259 @@ impl MevDetector {
             }
         }
 
+        None
+    }
+
+    /// 使用Jito API检查交易是否在束包中
+    pub async fn check_jito_bundle_api(&self, signature: &str) -> Option<JitoBundleInfo> {
+        let api_url = format!("https://bundles.jito.wtf/api/v1/bundles/transaction/{}", signature);
+        
+        match reqwest::get(&api_url).await {
+            Ok(response) => {
+                if response.status().is_success() {
+                    match response.json::<Vec<JitoBundleTransaction>>().await {
+                        Ok(data) => {
+                            if let Some(bundle_tx) = data.first() {
+                                debug!("找到束包ID: {}", bundle_tx.bundle_id);
+                                
+                                // 获取束包详细信息
+                                if let Some(bundle_detail) = self.get_bundle_details(&bundle_tx.bundle_id).await {
+                                    return Some(JitoBundleInfo {
+                                        bundle_id: bundle_tx.bundle_id.clone(),
+                                        landed_tip_lamports: bundle_detail.landed_tip_lamports,
+                                        transactions: bundle_detail.transactions,
+                                    });
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            debug!("解析Jito API响应失败: {}", e);
+                        }
+                    }
+                } else {
+                    debug!("Jito API请求失败，状态码: {}", response.status());
+                }
+            }
+            Err(e) => {
+                debug!("Jito API请求错误: {}", e);
+            }
+        }
+        
+        None
+    }
+
+    /// 获取束包的详细信息（包含交易列表）
+    async fn get_bundle_details(&self, bundle_id: &str) -> Option<JitoBundleDetail> {
+        let api_url = format!("https://bundles.jito.wtf/api/v1/bundles/bundle/{}", bundle_id);
+        
+        match reqwest::get(&api_url).await {
+            Ok(response) => {
+                if response.status().is_success() {
+                    match response.json::<Vec<JitoBundleDetail>>().await {
+                        Ok(data) => {
+                            if let Some(bundle_detail) = data.first() {
+                                debug!("束包详情: {} lamports, {} 个交易", 
+                                       bundle_detail.landed_tip_lamports, 
+                                       bundle_detail.transactions.len());
+                                return Some(bundle_detail.clone());
+                            }
+                        }
+                        Err(e) => {
+                            debug!("解析束包详情失败: {}", e);
+                        }
+                    }
+                } else {
+                    debug!("获取束包详情失败，状态码: {}", response.status());
+                }
+            }
+            Err(e) => {
+                debug!("获取束包详情请求错误: {}", e);
+            }
+        }
+        
+        None
+    }
+
+    /// 在本地交易中找到对应的束包信息
+    fn find_local_bundle_transactions(
+        &self,
+        block_transactions: &[Transaction],
+        target_index: usize,
+        bundle_info: &JitoBundleInfo,
+    ) -> Option<(usize, String, u64, bool, Vec<Transaction>, Option<JitoBundleInfo>)> {
+        // 在目标交易附近寻找可能的小费交易
+        let search_range = 10; // 搜索范围扩大到前后10个交易
+        let start_index = target_index.saturating_sub(search_range);
+        let end_index = (target_index + search_range).min(block_transactions.len());
+        
+        for i in start_index..end_index {
+            if i == target_index {
+                continue; // 跳过目标交易自身
+            }
+            
+            let tx = &block_transactions[i];
+            
+            // 检查是否包含Jito小费账户
+            if let Some((tip_account, _)) = self.check_single_transaction_for_jito_tip(tx) {
+                let is_before_target = i < target_index;
+                
+                // 构建束包交易列表
+                let bundle_transactions = if is_before_target {
+                    let bundle_end = (i + 5).min(block_transactions.len());
+                    block_transactions[i..bundle_end].to_vec()
+                } else {
+                    let bundle_start = i.saturating_sub(4);
+                    block_transactions[bundle_start..=i].to_vec()
+                };
+                
+                info!("通过API找到束包，本地验证成功");
+                return Some((
+                    i,
+                    tip_account,
+                    bundle_info.landed_tip_lamports,
+                    is_before_target,
+                    bundle_transactions,
+                    None, // 这里暂时为None，稍后会被设置
+                ));
+            }
+        }
+        
+        // 如果没有找到对应的小费交易，但API确认有束包，创建一个虚拟的束包结构
+        info!("API确认有束包但本地未找到小费交易，创建虚拟束包结构");
+        let bundle_start = target_index.saturating_sub(2);
+        let bundle_end = (target_index + 3).min(block_transactions.len());
+        let bundle_transactions = block_transactions[bundle_start..bundle_end].to_vec();
+        
+        Some((
+            target_index,
+            "API_CONFIRMED".to_string(), // 使用特殊标识表示这是API确认的束包
+            bundle_info.landed_tip_lamports,
+            false, // 假设小费在目标交易之后
+            bundle_transactions,
+            None, // 这里暂时为None，稍后会被设置
+        ))
+    }
+
+    /// 分析目标交易在束包中的位置
+    pub fn analyze_bundle_position(
+        &self,
+        bundle_info: &JitoBundleInfo,
+        target_signature: &str,
+    ) -> Option<BundlePositionAnalysis> {
+        if let Some(target_position) = bundle_info.transactions.iter()
+            .position(|sig| sig == target_signature) {
+            
+            let total_transactions = bundle_info.transactions.len();
+            let is_sandwiched = target_position > 0 && target_position < total_transactions - 1;
+            
+            let front_transactions = bundle_info.transactions[0..target_position].to_vec();
+            let back_transactions = if target_position + 1 < total_transactions {
+                bundle_info.transactions[target_position + 1..].to_vec()
+            } else {
+                Vec::new()
+            };
+            
+            Some(BundlePositionAnalysis {
+                target_position,
+                total_transactions,
+                is_sandwiched,
+                front_transactions,
+                back_transactions,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// 基于束包内交易创建虚拟交易列表（用于兼容原有检测逻辑）
+    pub async fn create_bundle_transactions(
+        &self,
+        client: &crate::client::SolanaClient,
+        bundle_info: &JitoBundleInfo,
+    ) -> Vec<Transaction> {
+        let mut transactions = Vec::new();
+        
+        for signature in &bundle_info.transactions {
+            if let Ok(tx) = client.get_transaction(signature).await {
+                transactions.push(tx);
+            } else {
+                debug!("无法获取束包交易: {}", signature);
+            }
+        }
+        
+        info!("成功获取束包内 {} / {} 个交易", transactions.len(), bundle_info.transactions.len());
+        transactions
+    }
+
+    /// 分析交易中的代币交换对
+    async fn analyze_swap_pair(
+        &self,
+        client: &crate::client::SolanaClient,
+        target_tx_sig: &str,
+        front_tx_sig: &str,
+        back_tx_sig: &str,
+    ) -> Option<(String, String, f64)> { // (token_a_symbol, token_b_symbol, exchange_rate)
+        // 尝试获取交易的余额变化数据来分析交换比率
+        if let (Ok(target_tx), Ok(front_tx), Ok(back_tx)) = (
+            client.get_transaction_with_balance_changes(target_tx_sig).await,
+            client.get_transaction_with_balance_changes(front_tx_sig).await,
+            client.get_transaction_with_balance_changes(back_tx_sig).await,
+        ) {
+            // 分析用户交易的代币变化
+            if let Some(meta) = &target_tx.meta {
+                let mut token_changes = Vec::new();
+                
+                // 分析Token余额变化
+                for post_token in &meta.post_token_balances {
+                    if let Some(pre_token) = meta.pre_token_balances.iter()
+                        .find(|pre| pre.account_index == post_token.account_index && pre.mint == post_token.mint) {
+                        
+                        let pre_amount = pre_token.ui_token_amount.ui_amount.unwrap_or(0.0);
+                        let post_amount = post_token.ui_token_amount.ui_amount.unwrap_or(0.0);
+                        let change = post_amount - pre_amount;
+                        
+                        if change.abs() > 0.000001 { // 有变化的代币
+                            token_changes.push((
+                                post_token.mint.clone(),
+                                get_token_symbol(&post_token.mint).to_string(),
+                                change,
+                            ));
+                        }
+                    }
+                }
+                
+                // 分析SOL余额变化
+                let mut sol_change = 0i64;
+                for (&pre_balance, &post_balance) in meta.pre_balances.iter()
+                    .zip(meta.post_balances.iter()) {
+                    sol_change += post_balance as i64 - pre_balance as i64;
+                }
+                
+                if sol_change.abs() > 1000 { // SOL有变化
+                    token_changes.push((
+                        token_info::WSOL.to_string(),
+                        "SOL".to_string(),
+                        sol_change as f64 / 1_000_000_000.0,
+                    ));
+                }
+                
+                // 找到变化最大的两个代币（一个增加，一个减少）
+                if token_changes.len() >= 2 {
+                    token_changes.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+                    
+                    let token_out = &token_changes[0]; // 减少的代币（用户卖出）
+                    let token_in = &token_changes[token_changes.len() - 1]; // 增加的代币（用户买入）
+                    
+                    if token_out.2 < 0.0 && token_in.2 > 0.0 {
+                        let exchange_rate = token_out.2.abs() / token_in.2;
+                        debug!("检测到交换对: {} -> {}, 汇率: {:.9}", 
+                               token_out.1, token_in.1, exchange_rate);
+                        return Some((token_out.1.clone(), token_in.1.clone(), exchange_rate));
+                    }
+                }
+            }
+        }
+        
         None
     }
 
@@ -548,7 +838,7 @@ impl MevDetector {
     }
 
     /// 检查交易是否为DEX交易
-    fn is_dex_transaction(&self, tx: &Transaction) -> bool {
+    pub fn is_dex_transaction(&self, tx: &Transaction) -> bool {
         const DEX_PROGRAMS: [&str; 7] = [
             RAYDIUM_AMM,
             RAYDIUM_CLMM,
@@ -639,7 +929,7 @@ impl MevDetector {
             (front_tx_result, target_tx_result, back_tx_result) {
             
             debug!("成功获取所有交易的余额变化数据，使用精确分析");
-            return self.perform_precise_analysis(&front_tx, &target_tx, &back_tx);
+            return self.perform_precise_analysis(&client, &front_tx, &target_tx, &back_tx, target_tx_sig, front_tx_sig, back_tx_sig).await;
         }
         
         debug!("无法获取完整的余额变化数据（可能是历史交易），回退到改进的估算方法");
@@ -647,11 +937,15 @@ impl MevDetector {
     }
     
     /// 执行精确的余额变化分析
-    fn perform_precise_analysis(
+    async fn perform_precise_analysis(
         &self,
+        client: &crate::client::SolanaClient,
         front_tx: &TransactionWithBalanceChanges,
         target_tx: &TransactionWithBalanceChanges,
         back_tx: &TransactionWithBalanceChanges,
+        target_tx_sig: &str,
+        front_tx_sig: &str,
+        back_tx_sig: &str,
     ) -> Option<UserLoss> {
         // 分析前置交易的真实流入
         let front_inflow = self.analyze_precise_inflow(front_tx);
@@ -976,7 +1270,11 @@ impl MevDetector {
     }
     
     /// 创建基于精确分析的代币损失详情
-    fn create_precise_token_losses(&self, inflow: &PreciseInflowAnalysis, estimated_sol_loss: u64) -> Vec<TokenLossDetail> {
+    fn create_precise_token_losses(
+        &self, 
+        inflow: &PreciseInflowAnalysis, 
+        estimated_sol_loss: u64,
+    ) -> Vec<TokenLossDetail> {
         let mut losses = Vec::new();
         
         // 添加SOL损失（如果有）
@@ -986,6 +1284,8 @@ impl MevDetector {
                 token_symbol: "SOL".to_string(),
                 loss_amount: estimated_sol_loss,
                 loss_amount_ui: estimated_sol_loss as f64 / 1_000_000_000.0,
+                equivalent_amount: None, // 简化：不在这里计算等价值
+                equivalent_symbol: None,
             });
         }
         
@@ -1009,7 +1309,7 @@ impl MevDetector {
             
             let token_loss_ui = token_flow.amount_ui * loss_rate;
             let token_loss_amount = (token_flow.amount as f64 * loss_rate) as u64;
-            
+
             // 提高最小损失阈值，过滤掉微小的损失
             if token_loss_ui > 1.0 { // 只记录大于1单位的损失
                 losses.push(TokenLossDetail {
@@ -1022,6 +1322,8 @@ impl MevDetector {
                     },
                     loss_amount: token_loss_amount,
                     loss_amount_ui: token_loss_ui,
+                    equivalent_amount: None, // 简化：不在这里计算等价值
+                    equivalent_symbol: None,
                 });
                 
                 debug!("检测到{}损失: {:.6} {} (地址: {})", 
@@ -1516,6 +1818,8 @@ impl MevDetector {
                 token_symbol: "SOL".to_string(),
                 loss_amount: estimated_sol_loss,
                 loss_amount_ui: estimated_sol_loss as f64 / 1_000_000_000.0,
+                equivalent_amount: None, // 指令解析方法暂时不计算等价值
+                equivalent_symbol: None,
             });
         }
         
@@ -1552,6 +1856,8 @@ impl MevDetector {
                     },
                     loss_amount: token_loss,
                     loss_amount_ui: token_loss_ui,
+                    equivalent_amount: None, // 指令解析方法暂时不计算等价值
+                    equivalent_symbol: None,
                 });
             }
         }

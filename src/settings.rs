@@ -22,6 +22,10 @@ pub struct MevDetectionConfig {
     // 小额转账阈值 (lamports)
     #[serde(default = "default_small_transfer_threshold")]
     pub small_transfer_threshold: u64,
+
+    // 忽略Jito功能 - 开启后不查询Jito API，不检查Jito小费，直接基于账户重合分析MEV
+    #[serde(default = "default_ignore_jito")]
+    pub ignore_jito: bool,
 }
 
 // 默认值函数
@@ -33,11 +37,16 @@ fn default_small_transfer_threshold() -> u64 {
     1_000_000
 }
 
+fn default_ignore_jito() -> bool {
+    false
+}
+
 impl Default for MevDetectionConfig {
     fn default() -> Self {
         Self {
             similarity_threshold: default_similarity_threshold(),
             small_transfer_threshold: default_small_transfer_threshold(),
+            ignore_jito: default_ignore_jito(),
         }
     }
 }

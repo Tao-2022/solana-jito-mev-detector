@@ -198,27 +198,89 @@ async fn analyze_transaction(
                     sandwich.account_intersection.len()
                 );
 
-                // 只使用精确余额变化分析
-                let precise_loss = detector.calculate_precise_sandwich_loss(
+                // 优先使用精确余额变化分析，如果失败则尝试指令解析分析
+                let mut loss_result = detector.calculate_precise_sandwich_loss(
                     &client,
                     &sandwich.front_tx,
                     target_signature,
                     &sandwich.back_tx,
                 ).await;
                 
-                if let Some(loss) = precise_loss {
+                // 如果精确分析失败，尝试指令解析分析
+                if loss_result.is_none() {
+                    loss_result = detector.calculate_instruction_based_loss(
+                        &client,
+                        &sandwich.front_tx,
+                        target_signature,
+                        &sandwich.back_tx,
+                    ).await;
+                }
+                
+                if let Some(loss) = loss_result {
                     println!("{}", locale.user_loss_estimation());
-                    println!(
-                        "{} {:.9} SOL",
-                        locale.loss_amount(),
-                        loss.estimated_loss_lamports as f64 / 1_000_000_000.0
-                    );
+                    
+                    // 智能选择显示单位：使用主要损失token的单位
+                    if let Some(primary_token_address) = &loss.primary_loss_token {
+                        if let Some(primary_token_loss) = loss.token_losses.iter()
+                            .find(|t| &t.token_address == primary_token_address) {
+                            // 如果主要损失不是SOL，则使用该token的单位显示
+                            if primary_token_loss.token_symbol != "SOL" {
+                                println!(
+                                    "{} {:.6} {}",
+                                    locale.loss_amount(),
+                                    primary_token_loss.loss_amount_ui,
+                                    primary_token_loss.token_symbol
+                                );
+                            } else {
+                                println!(
+                                    "{} {:.9} SOL",
+                                    locale.loss_amount(),
+                                    loss.estimated_loss_lamports as f64 / 1_000_000_000.0
+                                );
+                            }
+                        } else {
+                            // 默认SOL显示
+                            println!(
+                                "{} {:.9} SOL",
+                                locale.loss_amount(),
+                                loss.estimated_loss_lamports as f64 / 1_000_000_000.0
+                            );
+                        }
+                    } else {
+                        // 没有主要token，默认SOL显示
+                        println!(
+                            "{} {:.9} SOL",
+                            locale.loss_amount(),
+                            loss.estimated_loss_lamports as f64 / 1_000_000_000.0
+                        );
+                    }
+                    
                     println!("{} {:.2}%", locale.loss_percentage(), loss.loss_percentage);
-                    println!(
-                        "{} {:.9} SOL",
-                        locale.mev_profit(),
-                        loss.mev_profit_lamports as f64 / 1_000_000_000.0
-                    );
+                    
+                    // 智能显示攻击者利润：使用主要利润token的单位
+                    if let Some(profit_token) = &loss.mev_profit_token {
+                        if profit_token == "SOL" {
+                            println!(
+                                "{} {:.9} SOL",
+                                locale.mev_profit(),
+                                loss.mev_profit_amount
+                            );
+                        } else {
+                            println!(
+                                "{} {:.6} {}",
+                                locale.mev_profit(),
+                                loss.mev_profit_amount,
+                                profit_token
+                            );
+                        }
+                    } else {
+                        // 默认SOL显示
+                        println!(
+                            "{} {:.9} SOL",
+                            locale.mev_profit(),
+                            loss.mev_profit_lamports as f64 / 1_000_000_000.0
+                        );
+                    }
                     println!("{} {}", locale.calculation_method(), loss.calculation_method);
                     
                     // 显示新的置信度和验证信息

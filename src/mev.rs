@@ -28,6 +28,8 @@ pub struct UserLoss {
     pub loss_percentage: f64,
     pub calculation_method: String,
     pub mev_profit_lamports: u64,
+    pub mev_profit_token: Option<String>, // 攻击者主要利润的token
+    pub mev_profit_amount: f64, // 攻击者主要利润的数量
     pub confidence_score: f64,
     pub validation_passed: bool,
     pub token_losses: Vec<TokenLossDetail>,
@@ -43,21 +45,6 @@ pub struct TokenLossDetail {
     pub loss_amount_ui: f64,
 }
 
-/// 交易价值分析结果
-#[derive(Debug, Clone)]
-pub struct TradeValue {
-    pub estimated_total_value: u64,
-}
-
-/// 池子信息结构体
-#[derive(Debug, Clone)]
-pub struct PoolInfo {
-    pub dex_type: DexType,
-    pub token_a: String,
-    pub token_b: String,
-    pub decimals_a: u8,
-    pub decimals_b: u8,
-}
 
 /// DEX类型枚举
 #[derive(Debug, Clone, PartialEq)]
@@ -70,31 +57,6 @@ pub enum DexType {
     Unknown,
 }
 
-/// 攻击者利润详情
-#[derive(Debug, Clone)]
-pub struct AttackerProfit {
-    pub token_a_profit: i64,
-    pub token_b_profit: i64,
-    pub net_sol_profit: u64,
-    pub confidence: f64,
-}
-
-/// 账户资金流入分析结果
-#[derive(Debug, Clone)]
-pub struct AccountInflowAnalysis {
-    pub total_sol_inflow: u64,
-    pub token_inflows: Vec<TokenFlowDetail>,
-    pub involved_addresses: HashSet<String>,
-    pub instruction_count: usize,
-}
-
-/// 账户资金流出分析结果
-#[derive(Debug, Clone)]
-pub struct AccountOutflowAnalysis {
-    pub total_sol_outflow: u64,
-    pub involved_addresses: HashSet<String>,
-    pub instruction_count: usize,
-}
 
 /// 代币流动详情
 #[derive(Debug, Clone)]
@@ -106,29 +68,26 @@ pub struct TokenFlowDetail {
     pub decimals: u8,
 }
 
-/// 系统转账流入信息
+/// Swap指令解析结果
 #[derive(Debug, Clone)]
-struct SystemTransferInflow {
-    amount: u64,
-    from_address: String,
+pub struct SwapInstructionData {
+    pub dex_type: DexType,
+    pub token_in: String,
+    pub token_out: String,
+    pub amount_in: u64,
+    pub amount_out: u64,
+    pub user_address: String,
+    pub pool_address: String,
 }
 
-/// 综合交易流动分析结果
+/// 交易指令解析汇总
 #[derive(Debug, Clone)]
-pub struct ComprehensiveFlowAnalysis {
-    pub net_sol_amount: u64,
-    pub token_flows: Vec<TokenFlowDetail>,
-    pub total_instructions: usize,
-    pub dex_complexity_score: f64,
-    pub involved_addresses: HashSet<String>,
+pub struct TransactionInstructionData {
+    pub swap_instructions: Vec<SwapInstructionData>,
+    pub total_sol_amount: u64,
+    pub involved_tokens: Vec<String>,
 }
 
-/// 系统转账流出信息
-#[derive(Debug, Clone)]
-struct SystemTransferOutflow {
-    amount: u64,
-    to_address: String,
-}
 
 /// 抢跑攻击检测结果
 #[derive(Debug, Clone)]
@@ -624,7 +583,7 @@ impl MevDetector {
     fn is_likely_swap_transaction(&self, tx: &Transaction) -> bool {
         let account_count = tx.transaction.message.account_keys.len();
 
-        let has_multiple_accounts = account_count >= self.config.trade_size.min_swap_accounts;
+        let has_multiple_accounts = account_count >= 6; // 默认最少6个账户的swap交易
 
         let has_non_system_instructions = tx.transaction.message.instructions.iter().any(|inst| {
             if let Some(program_id) = tx
@@ -659,330 +618,6 @@ impl MevDetector {
 
 
     
-    
-    /// 解析代币转账金额
-    fn parse_token_transfer_amount(&self, instruction_data: &str) -> Option<u64> {
-        if let Ok(data) = bs58::decode(instruction_data).into_vec() {
-            if data.len() >= 9 && data[0] == 3 { // SPL Token Transfer instruction
-                if let Ok(amount_bytes) = data[1..9].try_into() {
-                    return Some(u64::from_le_bytes(amount_bytes));
-                }
-            }
-        }
-        None
-    }
-    /// 计算交易向指定账户的资金流入量
-    fn calculate_account_inflow(&self, tx: &Transaction, target_accounts: &[String]) -> AccountInflowAnalysis {
-        let mut total_sol_inflow = 0u64;
-        let mut token_inflows = Vec::new();
-        let mut involved_addresses = HashSet::new();
-        
-        debug!("开始分析资金流入到目标账户:");
-        debug!("目标账户: {:?}", target_accounts);
-        
-        for (i, instruction) in tx.transaction.message.instructions.iter().enumerate() {
-            if let Some(program_id) = tx.transaction.message.account_keys.get(instruction.program_id_index as usize) {
-                debug!("分析指令{}: {}", i + 1, program_id);
-                
-                match program_id.as_str() {
-                    SYSTEM => {
-                        if let Some(inflow) = self.analyze_system_transfer_inflow(instruction, &tx.transaction.message.account_keys, target_accounts) {
-                            debug!("  发现System转账流入: {:.9} SOL, 来源: {}", inflow.amount as f64 / 1_000_000_000.0, inflow.from_address);
-                            total_sol_inflow += inflow.amount;
-                            involved_addresses.insert(inflow.from_address.clone());
-                        }
-                    },
-                    TOKEN_PROGRAM_ID => {
-                        if let Some(token_inflow) = self.analyze_token_transfer_inflow(instruction, &tx.transaction.message.account_keys, target_accounts) {
-                            debug!("  发现Token转账流入: {:.9} {}", token_inflow.amount_ui, token_inflow.token_symbol);
-                            if token_inflow.token_address == WSOL {
-                                total_sol_inflow += token_inflow.amount;
-                            } else {
-                                token_inflows.push(token_inflow);
-                            }
-                        }
-                    },
-                    _ => {
-                        if let Some(dex_inflow) = self.analyze_dex_program_inflow(instruction, &tx.transaction.message.account_keys, target_accounts, program_id) {
-                            debug!("  DEX程序估算流入: {:.9} SOL", dex_inflow as f64 / 1_000_000_000.0);
-                            total_sol_inflow += dex_inflow;
-                        }
-                    }
-                }
-            }
-        }
-        
-        debug!("资金流入分析完成 - 总SOL流入: {:.9} SOL, 代币流入种类: {}", 
-               total_sol_inflow as f64 / 1_000_000_000.0, token_inflows.len());
-        
-        AccountInflowAnalysis {
-            total_sol_inflow,
-            token_inflows,
-            involved_addresses,
-            instruction_count: tx.transaction.message.instructions.len(),
-        }
-    }
-    
-        /// 计算交易从指定账户的资金流出量
-    fn calculate_account_outflow(&self, tx: &Transaction, target_accounts: &[String]) -> AccountOutflowAnalysis {
-        let mut total_sol_outflow = 0u64;
-        let mut involved_addresses = HashSet::new();
-        
-        debug!("开始分析资金从目标账户流出:");
-        debug!("目标账户: {:?}", target_accounts);
-        
-        for (i, instruction) in tx.transaction.message.instructions.iter().enumerate() {
-            if let Some(program_id) = tx.transaction.message.account_keys.get(instruction.program_id_index as usize) {
-                debug!("分析指令{}: {}", i + 1, program_id);
-                
-                match program_id.as_str() {
-                    SYSTEM => {
-                        if let Some(outflow) = self.analyze_system_transfer_outflow(instruction, &tx.transaction.message.account_keys, target_accounts) {
-                            debug!("  发现System转账流出: {:.9} SOL, 目标: {}", outflow.amount as f64 / 1_000_000_000.0, outflow.to_address);
-                            total_sol_outflow += outflow.amount;
-                            involved_addresses.insert(outflow.to_address.clone());
-                        }
-                    },
-                    TOKEN_PROGRAM_ID => {
-                        if let Some(token_outflow) = self.analyze_token_transfer_outflow(instruction, &tx.transaction.message.account_keys, target_accounts) {
-                            debug!("  发现Token转账流出: {:.9} {}", token_outflow.amount_ui, token_outflow.token_symbol);
-                            if token_outflow.token_address == WSOL {
-                                total_sol_outflow += token_outflow.amount;
-                            }
-                        }
-                    },
-                    _ => {
-                        if let Some(dex_outflow) = self.analyze_dex_program_outflow(instruction, &tx.transaction.message.account_keys, target_accounts, program_id) {
-                            debug!("  DEX程序估算流出: {:.9} SOL", dex_outflow as f64 / 1_000_000_000.0);
-                            total_sol_outflow += dex_outflow;
-                        }
-                    }
-                }
-            }
-        }
-        
-        debug!("资金流出分析完成 - 总SOL流出: {:.9} SOL", total_sol_outflow as f64 / 1_000_000_000.0);
-        
-        AccountOutflowAnalysis {
-            total_sol_outflow,
-            involved_addresses,
-            instruction_count: tx.transaction.message.instructions.len(),
-        }
-    }
-
-    fn analyze_system_transfer_inflow(
-        &self,
-        instruction: &crate::client::Instruction,
-        account_keys: &[String],
-        target_accounts: &[String],
-    ) -> Option<SystemTransferInflow> {
-        if instruction.accounts.len() < 2 {
-            return None;
-        }
-        
-        let from_account = account_keys.get(instruction.accounts[0] as usize)?;
-        let to_account = account_keys.get(instruction.accounts[1] as usize)?;
-        
-        if target_accounts.contains(to_account) {
-            if let Some(amount) = self.parse_transfer_amount(&instruction.data) {
-                return Some(SystemTransferInflow {
-                    amount,
-                    from_address: from_account.clone(),
-                });
-            }
-        }
-        
-        None
-    }
-    
-    /// 分析系统程序转账的流出情况
-    fn analyze_system_transfer_outflow(
-        &self,
-        instruction: &crate::client::Instruction,
-        account_keys: &[String],
-        target_accounts: &[String],
-    ) -> Option<SystemTransferOutflow> {
-        if instruction.accounts.len() < 2 {
-            return None;
-        }
-        
-        let from_account = account_keys.get(instruction.accounts[0] as usize)?;
-        let to_account = account_keys.get(instruction.accounts[1] as usize)?;
-        
-        if target_accounts.contains(from_account) {
-            if let Some(amount) = self.parse_transfer_amount(&instruction.data) {
-                return Some(SystemTransferOutflow {
-                    amount,
-                    to_address: to_account.clone(),
-                });
-            }
-        }
-        
-        None
-    }
-    
-    /// 分析SPL Token转账的流入情况
-    fn analyze_token_transfer_inflow(
-        &self,
-        instruction: &crate::client::Instruction,
-        account_keys: &[String],
-        target_accounts: &[String],
-    ) -> Option<TokenFlowDetail> {
-        if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
-            if data.len() >= 9 && data[0] == 3 {
-                if let Ok(amount_bytes) = data[1..9].try_into() {
-                    let amount = u64::from_le_bytes(amount_bytes);
-                    
-                    if instruction.accounts.len() >= 3 {
-                        let _source_account = account_keys.get(instruction.accounts[0] as usize)?;
-                        let dest_account = account_keys.get(instruction.accounts[1] as usize)?;
-                        
-                        if target_accounts.contains(dest_account) {
-                            let token_address = self.infer_token_mint_from_accounts(account_keys).unwrap_or_else(|| WSOL.to_string());
-                            
-                            return Some(TokenFlowDetail {
-                                token_address: token_address.clone(),
-                                token_symbol: get_token_symbol(&token_address).to_string(),
-                                amount,
-                                amount_ui: self.convert_token_amount_to_ui(amount, get_token_decimals(&token_address)),
-                                decimals: get_token_decimals(&token_address),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-        
-        None
-    }
-    
-    /// 分析SPL Token转账的流出情况
-    fn analyze_token_transfer_outflow(
-        &self,
-        instruction: &crate::client::Instruction,
-        account_keys: &[String],
-        target_accounts: &[String],
-    ) -> Option<TokenFlowDetail> {
-        if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
-            if data.len() >= 9 && data[0] == 3 {
-                if let Ok(amount_bytes) = data[1..9].try_into() {
-                    let amount = u64::from_le_bytes(amount_bytes);
-                    
-                    if instruction.accounts.len() >= 3 {
-                        let source_account = account_keys.get(instruction.accounts[0] as usize)?;
-                        let _dest_account = account_keys.get(instruction.accounts[1] as usize)?;
-                        
-                        if target_accounts.contains(source_account) {
-                            let token_address = self.infer_token_mint_from_accounts(account_keys).unwrap_or_else(|| WSOL.to_string());
-                            
-                            return Some(TokenFlowDetail {
-                                token_address: token_address.clone(),
-                                token_symbol: get_token_symbol(&token_address).to_string(),
-                                amount,
-                                amount_ui: self.convert_token_amount_to_ui(amount, get_token_decimals(&token_address)),
-                                decimals: get_token_decimals(&token_address),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-        
-        None
-    }
-    
-    /// 分析DEX程序的资金流入（简化实现）
-    fn analyze_dex_program_inflow(
-        &self,
-        instruction: &crate::client::Instruction,
-        _account_keys: &[String],
-        _target_accounts: &[String],
-        program_id: &str,
-    ) -> Option<u64> {
-        let complexity_factor = match program_id {
-            RAYDIUM_AMM | RAYDIUM_CLMM => 2.0,
-            ORCA_WHIRLPOOLS | ORCA_V1 => 1.8,
-            JUPITER => 1.5,
-            _ => 1.0,
-        };
-        
-        let base_estimation = instruction.accounts.len() as u64 * 1_000_000;
-        Some((base_estimation as f64 * complexity_factor) as u64)
-    }
-    
-    /// 分析DEX程序的资金流出（简化实现）
-    fn analyze_dex_program_outflow(
-        &self,
-        instruction: &crate::client::Instruction,
-        account_keys: &[String],
-        target_accounts: &[String],
-        program_id: &str,
-    ) -> Option<u64> {
-        self.analyze_dex_program_inflow(instruction, account_keys, target_accounts, program_id)
-    }
-    
-    /// 从账户列表中推断代币mint地址
-    fn infer_token_mint_from_accounts(&self, account_keys: &[String]) -> Option<String> {
-        let common_tokens = [WSOL, USDC, USDT, RAY, BONK, WIF];
-        for account in account_keys {
-            if common_tokens.contains(&account.as_str()) {
-                return Some(account.clone());
-            }
-        }
-        
-        None
-    }
-    
-    /// 基于复杂度估算损失（当无法直接计算攻击者利润时）
-    fn estimate_loss_from_complexity(
-        &self,
-        front_inflow: &AccountInflowAnalysis,
-        back_outflow: &AccountOutflowAnalysis,
-        user_trade_value: u64,
-    ) -> u64 {
-        let complexity_score = (front_inflow.instruction_count + back_outflow.instruction_count) as u64;
-        let flow_volume = front_inflow.total_sol_inflow + back_outflow.total_sol_outflow;
-        
-        let base_loss_rate = 0.001 + (complexity_score as f64 / 20.0) * 0.004;
-        let volume_factor = if flow_volume > 0 { (flow_volume as f64 / user_trade_value as f64).min(1.0) } else { 0.1 };
-        
-        let estimated_loss = (user_trade_value as f64 * base_loss_rate * volume_factor) as u64;
-        estimated_loss.max(1_000_000)
-    }
-    
-    /// 创建详细的代币损失信息
-    fn create_detailed_token_losses(
-        &self,
-        front_inflow: &AccountInflowAnalysis,
-        total_estimated_loss: u64,
-    ) -> Vec<TokenLossDetail> {
-        let mut losses = Vec::new();
-        
-        if total_estimated_loss > 0 {
-            losses.push(TokenLossDetail {
-                token_address: WSOL.to_string(),
-                token_symbol: "SOL".to_string(),
-                loss_amount: total_estimated_loss,
-                loss_amount_ui: total_estimated_loss as f64 / 1_000_000_000.0,
-            });
-        }
-        
-        for token_inflow in &front_inflow.token_inflows {
-            if token_inflow.token_address != WSOL {
-                let token_loss = (token_inflow.amount as f64 * 0.02) as u64;
-                if token_loss > 0 {
-                    losses.push(TokenLossDetail {
-                        token_address: token_inflow.token_address.clone(),
-                        token_symbol: token_inflow.token_symbol.clone(),
-                        loss_amount: token_loss,
-                        loss_amount_ui: token_inflow.amount_ui * 0.02,
-                    });
-                }
-            }
-        }
-        
-        losses
-    }
     
     /// 基于真实余额变化的精确损失计算（新方法）
     pub async fn calculate_precise_sandwich_loss(
@@ -1033,50 +668,170 @@ impl MevDetector {
         let user_trade_value = self.analyze_precise_trade_value(target_tx);
         debug!("用户交易精确价值: {:.9} SOL", user_trade_value as f64 / 1_000_000_000.0);
         
-        // 计算攻击者净利润
-        let attacker_net_profit = back_outflow.total_sol_outflow.saturating_sub(front_inflow.total_sol_inflow);
-        debug!("攻击者精确净利润: {:.9} SOL", attacker_net_profit as f64 / 1_000_000_000.0);
+        // 计算攻击者净利润（多token支持）
+        let attacker_sol_profit = back_outflow.total_sol_outflow.saturating_sub(front_inflow.total_sol_inflow);
+        debug!("攻击者SOL净利润: {:.9} SOL", attacker_sol_profit as f64 / 1_000_000_000.0);
         
-        // 基于真实数据计算用户损失
-        let estimated_user_loss = if attacker_net_profit > 0 && user_trade_value > 0 {
-            // 使用攻击者利润的85-95%作为用户损失的保守估计
-            (attacker_net_profit as f64 * 0.90) as u64
+        // 计算攻击者在各种token上的净利润
+        let mut attacker_token_profits = Vec::new();
+        
+        // 分析后置交易的token流出（攻击者卖出获得的token）
+        let back_token_outflows = self.analyze_precise_token_outflow(back_tx);
+        
+        // 计算每种token的净利润
+        for back_outflow in &back_token_outflows {
+            // 找到对应的前置交易流入
+            if let Some(front_inflow_token) = front_inflow.token_inflows.iter()
+                .find(|t| t.token_address == back_outflow.token_address) {
+                
+                // 计算净利润：后置流出 - 前置流入
+                if back_outflow.amount_ui > front_inflow_token.amount_ui {
+                    let net_profit_ui = back_outflow.amount_ui - front_inflow_token.amount_ui;
+                    let net_profit_amount = back_outflow.amount.saturating_sub(front_inflow_token.amount);
+                    
+                    attacker_token_profits.push(TokenFlowDetail {
+                        token_address: back_outflow.token_address.clone(),
+                        token_symbol: back_outflow.token_symbol.clone(),
+                        amount: net_profit_amount,
+                        amount_ui: net_profit_ui,
+                        decimals: back_outflow.decimals,
+                    });
+                    
+                    debug!("攻击者{}净利润: {:.6} {}", 
+                           back_outflow.token_symbol, net_profit_ui, back_outflow.token_symbol);
+                }
+            }
+        }
+        
+        // 确定主要利润token（最大利润的token）
+        let primary_profit_token = if attacker_sol_profit > 1_000_000 { // SOL利润 > 0.001
+            Some(("SOL".to_string(), attacker_sol_profit as f64 / 1_000_000_000.0))
         } else {
-            // 如果无法从攻击者利润推算，使用交易价值的滑点估算
-            (user_trade_value as f64 * 0.005) as u64 // 0.5%的滑点损失
+            attacker_token_profits.iter()
+                .max_by(|a, b| a.amount_ui.partial_cmp(&b.amount_ui).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|token| (token.token_symbol.clone(), token.amount_ui))
         };
         
-        let loss_percentage = if user_trade_value > 0 {
-            (estimated_user_loss as f64 / user_trade_value as f64) * 100.0
-        } else {
-            0.0
-        };
+        if let Some((profit_token, profit_amount)) = &primary_profit_token {
+            debug!("攻击者主要利润: {:.6} {}", profit_amount, profit_token);
+        }
         
         // 创建详细的代币损失信息
-        let token_losses = self.create_precise_token_losses(&front_inflow, estimated_user_loss);
+        let token_losses = self.create_precise_token_losses(&front_inflow, 0); // 先不传SOL损失
+        
+        // 基于真实数据计算用户损失
+        let (estimated_user_loss, loss_percentage) = if !token_losses.is_empty() {
+            // 如果有token损失，以主要token损失为准
+            let primary_token_loss = token_losses.iter()
+                .max_by(|a, b| a.loss_amount.cmp(&b.loss_amount));
+            
+            if let Some(primary_loss) = primary_token_loss {
+                // 如果主要损失不是SOL，则用该token的损失值
+                if primary_loss.token_symbol != "SOL" {
+                    // 对于非SOL token，损失以该token为单位，百分比基于该token的流入量
+                    let token_inflow = front_inflow.token_inflows.iter()
+                        .find(|t| t.token_address == primary_loss.token_address);
+                    
+                    let percentage = if let Some(inflow) = token_inflow {
+                        if inflow.amount_ui > 0.0 {
+                            (primary_loss.loss_amount_ui / inflow.amount_ui) * 100.0
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        // 默认基于攻击者利润估算的百分比
+                        if user_trade_value > 0 {
+                            let sol_loss = (attacker_sol_profit as f64 * 0.90) as u64;
+                            (sol_loss as f64 / user_trade_value as f64) * 100.0
+                        } else {
+                            0.0
+                        }
+                    };
+                    
+                    (primary_loss.loss_amount, percentage)
+                } else {
+                    // 主要损失是SOL
+                    let sol_loss = if attacker_sol_profit > 0 && user_trade_value > 0 {
+                        (attacker_sol_profit as f64 * 0.90) as u64
+                    } else {
+                        (user_trade_value as f64 * 0.005) as u64
+                    };
+                    
+                    let percentage = if user_trade_value > 0 {
+                        (sol_loss as f64 / user_trade_value as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+                    
+                    (sol_loss, percentage)
+                }
+            } else {
+                // 没有token损失，使用SOL损失
+                let sol_loss = if attacker_sol_profit > 0 && user_trade_value > 0 {
+                    (attacker_sol_profit as f64 * 0.90) as u64
+                } else {
+                    (user_trade_value as f64 * 0.005) as u64
+                };
+                
+                let percentage = if user_trade_value > 0 {
+                    (sol_loss as f64 / user_trade_value as f64) * 100.0
+                } else {
+                    0.0
+                };
+                
+                (sol_loss, percentage)
+            }
+        } else {
+            // 没有token损失，使用SOL损失
+            let sol_loss = if attacker_sol_profit > 0 && user_trade_value > 0 {
+                (attacker_sol_profit as f64 * 0.90) as u64
+            } else {
+                (user_trade_value as f64 * 0.005) as u64
+            };
+            
+            let percentage = if user_trade_value > 0 {
+                (sol_loss as f64 / user_trade_value as f64) * 100.0
+            } else {
+                0.0
+            };
+            
+            (sol_loss, percentage)
+        };
+        
+        // 如果主要损失是SOL，需要重新创建包含SOL损失的token_losses
+        let final_token_losses = if token_losses.is_empty() || 
+            token_losses.iter().all(|t| t.token_symbol != "SOL") {
+            self.create_precise_token_losses(&front_inflow, estimated_user_loss)
+        } else {
+            token_losses
+        };
         
         // 计算置信度（基于真实数据的置信度更高）
         let confidence_score = self.calculate_precise_confidence(
-            &front_inflow, &back_outflow, attacker_net_profit, user_trade_value
+            &front_inflow, &back_outflow, attacker_sol_profit, user_trade_value
         );
         
         // 验证结果
         let validation_passed = self.validate_precise_result(
-            estimated_user_loss, attacker_net_profit, user_trade_value
+            estimated_user_loss, attacker_sol_profit, user_trade_value
         );
         
         // 识别主要损失代币
-        let primary_loss_token = self.identify_primary_loss_token(&token_losses);
+        let primary_loss_token = self.identify_primary_loss_token(&final_token_losses);
         
         if estimated_user_loss > 1000 { // 至少0.000001 SOL才认为有损失
+            let (profit_token, profit_amount) = primary_profit_token.unwrap_or(("SOL".to_string(), attacker_sol_profit as f64 / 1_000_000_000.0));
+            
             Some(UserLoss {
                 estimated_loss_lamports: estimated_user_loss,
                 loss_percentage: loss_percentage.min(15.0), // 最大损失15%
                 calculation_method: "精确余额变化分析法".to_string(),
-                mev_profit_lamports: attacker_net_profit,
+                mev_profit_lamports: attacker_sol_profit, // 保持SOL单位，用于兼容
+                mev_profit_token: Some(profit_token),
+                mev_profit_amount: profit_amount,
                 confidence_score,
                 validation_passed,
-                token_losses,
+                token_losses: final_token_losses,
                 primary_loss_token,
             })
         } else {
@@ -1159,6 +914,43 @@ impl MevDetector {
         }
     }
     
+    /// 分析交易的精确token流出（基于余额变化）
+    fn analyze_precise_token_outflow(&self, tx: &TransactionWithBalanceChanges) -> Vec<TokenFlowDetail> {
+        let mut token_outflows = Vec::new();
+        
+        if let Some(meta) = &tx.meta {
+            // 分析Token余额变化
+            for pre_token in &meta.pre_token_balances {
+                if let Some(post_token) = meta.post_token_balances.iter()
+                    .find(|post| post.account_index == pre_token.account_index && post.mint == pre_token.mint) {
+                    
+                    let pre_amount = pre_token.ui_token_amount.amount.parse::<u64>().unwrap_or(0);
+                    let post_amount = post_token.ui_token_amount.amount.parse::<u64>().unwrap_or(0);
+                    
+                    // 检查是否有token流出（余额减少）
+                    if pre_amount > post_amount {
+                        let outflow_amount = pre_amount - post_amount;
+                        let ui_outflow = pre_token.ui_token_amount.ui_amount.unwrap_or(0.0) -
+                                        post_token.ui_token_amount.ui_amount.unwrap_or(0.0);
+                        
+                        token_outflows.push(TokenFlowDetail {
+                            token_address: pre_token.mint.clone(),
+                            token_symbol: get_token_symbol(&pre_token.mint).to_string(),
+                            amount: outflow_amount,
+                            amount_ui: ui_outflow.abs(),
+                            decimals: pre_token.ui_token_amount.decimals,
+                        });
+                        
+                        debug!("Token {}流出: {:.6} {}", 
+                               pre_token.mint, ui_outflow, get_token_symbol(&pre_token.mint));
+                    }
+                }
+            }
+        }
+        
+        token_outflows
+    }
+    
     /// 分析交易的精确价值（基于余额变化）
     fn analyze_precise_trade_value(&self, tx: &TransactionWithBalanceChanges) -> u64 {
         let mut total_value = 0u64;
@@ -1198,27 +990,42 @@ impl MevDetector {
         }
         
         // 添加Token损失（基于前置交易中检测到的Token流入）
+        // 排除SOL/WSOL，避免重复计算
         for token_flow in &inflow.token_inflows {
-            // 估算该Token的损失：使用Token流入量的1-3%作为损失估算
-            let loss_rate = if token_flow.token_symbol == "USDC" || token_flow.token_symbol == "USDT" {
+            // 跳过SOL和WSOL，避免重复计算
+            if token_flow.token_address == WSOL || token_flow.token_symbol == "SOL" {
+                continue;
+            }
+            
+            // 基于用户实际损失和攻击者获得的token数量来计算更合理的损失
+            // 对于大额token交易，使用更保守的损失率
+            let loss_rate = if token_flow.amount_ui > 100000.0 { // 大额交易
+                0.003 // 0.3%损失率，更保守
+            } else if token_flow.token_symbol == "USDC" || token_flow.token_symbol == "USDT" {
                 0.02 // 稳定币损失率2%
             } else {
-                0.015 // 其他Token损失率1.5%
+                0.008 // 其他Token损失率0.8%，比之前更保守
             };
             
             let token_loss_ui = token_flow.amount_ui * loss_rate;
             let token_loss_amount = (token_flow.amount as f64 * loss_rate) as u64;
             
-            if token_loss_ui > 0.001 { // 只记录大于0.001单位的损失
+            // 提高最小损失阈值，过滤掉微小的损失
+            if token_loss_ui > 1.0 { // 只记录大于1单位的损失
                 losses.push(TokenLossDetail {
                     token_address: token_flow.token_address.clone(),
-                    token_symbol: token_flow.token_symbol.clone(),
+                    token_symbol: if token_flow.token_symbol == "UNKNOWN" {
+                        // 尝试从地址中提取token名称或使用地址前8位作为标识
+                        format!("Token_{}", &token_flow.token_address[0..8.min(token_flow.token_address.len())])
+                    } else {
+                        token_flow.token_symbol.clone()
+                    },
                     loss_amount: token_loss_amount,
                     loss_amount_ui: token_loss_ui,
                 });
                 
-                debug!("检测到{}损失: {:.6} {}", 
-                       token_flow.token_symbol, token_loss_ui, token_flow.token_symbol);
+                debug!("检测到{}损失: {:.6} {} (地址: {})", 
+                       token_flow.token_symbol, token_loss_ui, token_flow.token_symbol, token_flow.token_address);
             }
         }
         
@@ -1263,79 +1070,11 @@ impl MevDetector {
         true
     }
     
-    /// 计算交集账户损失的置信度
-    fn calculate_intersection_loss_confidence(
-        &self,
-        front_inflow: &AccountInflowAnalysis,
-        back_outflow: &AccountOutflowAnalysis,
-        attacker_net_profit: u64,
-        user_trade_value: u64,
-    ) -> f64 {
-        let mut confidence = 0.0;
-        
-        if front_inflow.total_sol_inflow > 0 && back_outflow.total_sol_outflow > 0 {
-            confidence += 0.3;
-        } else if front_inflow.total_sol_inflow > 0 || back_outflow.total_sol_outflow > 0 {
-            confidence += 0.15;
-        }
-        
-        if attacker_net_profit > 0 {
-            let profit_ratio = attacker_net_profit as f64 / user_trade_value as f64;
-            if profit_ratio >= 0.001 && profit_ratio <= 0.1 {
-                confidence += 0.25;
-            } else if profit_ratio > 0.0 {
-                confidence += 0.15;
-            }
-        }
-        
-        let total_instructions = front_inflow.instruction_count + back_outflow.instruction_count;
-        confidence += 0.2 * (total_instructions as f64 / 10.0).min(1.0);
-        
-        let address_overlap = front_inflow.involved_addresses.intersection(&back_outflow.involved_addresses).count();
-        confidence += 0.15 * (address_overlap as f64 / 3.0).min(1.0);
-        
-        confidence += 0.1;
-        
-        confidence.min(1.0)
-    }
-    
-    /// 验证交集账户损失结果的合理性
-    fn validate_intersection_loss_result(
-        &self,
-        estimated_loss: u64,
-        attacker_profit: u64,
-        user_trade_value: u64,
-    ) -> bool {
-        if estimated_loss > user_trade_value / 6 {
-            return false;
-        }
-        
-        if attacker_profit > 0 && estimated_loss > attacker_profit * 3 / 2 {
-            return false;
-        }
-        
-        if estimated_loss < 100_000 {
-            return false;
-        }
-        
-        if estimated_loss > 100_000_000_000 {
-            return false;
-        }
-        
-        true
-    }
-
-
     /// 识别主要损失代币
     fn identify_primary_loss_token(&self, token_losses: &[TokenLossDetail]) -> Option<String> {
         token_losses.iter()
             .max_by(|a, b| a.loss_amount.cmp(&b.loss_amount))
             .map(|loss| loss.token_address.clone())
-    }
-
-    /// 将代币数量转换为UI显示格式
-    fn convert_token_amount_to_ui(&self, amount: u64, decimals: u8) -> f64 {
-        amount as f64 / 10_u64.pow(decimals as u32) as f64
     }
     
 }
@@ -1351,4 +1090,498 @@ pub struct PreciseInflowAnalysis {
 #[derive(Debug, Clone)]
 pub struct PreciseOutflowAnalysis {
     pub total_sol_outflow: u64,
+}
+
+impl MevDetector {
+    /// 解析交易中的swap指令数据
+    pub fn parse_transaction_instructions(&self, tx: &Transaction) -> TransactionInstructionData {
+        let mut swap_instructions = Vec::new();
+        let mut total_sol_amount = 0u64;
+        let mut involved_tokens = Vec::new();
+        
+        debug!("开始解析交易指令，共{}个指令", tx.transaction.message.instructions.len());
+        
+        for (idx, instruction) in tx.transaction.message.instructions.iter().enumerate() {
+            if let Some(program_id) = tx.transaction.message.account_keys.get(instruction.program_id_index as usize) {
+                debug!("指令{}: program_id = {}", idx, program_id);
+                
+                if let Some(swap_data) = self.parse_swap_instruction(instruction, &tx.transaction.message.account_keys, program_id) {
+                    debug!("成功解析swap指令: {:?}", swap_data);
+                    total_sol_amount += swap_data.amount_in;
+                    
+                    if !involved_tokens.contains(&swap_data.token_in) {
+                        involved_tokens.push(swap_data.token_in.clone());
+                    }
+                    if !involved_tokens.contains(&swap_data.token_out) {
+                        involved_tokens.push(swap_data.token_out.clone());
+                    }
+                    
+                    swap_instructions.push(swap_data);
+                }
+            }
+        }
+        
+        debug!("指令解析完成，找到{}个swap指令", swap_instructions.len());
+        
+        TransactionInstructionData {
+            swap_instructions,
+            total_sol_amount,
+            involved_tokens,
+        }
+    }
+    
+    /// 解析单个swap指令
+    fn parse_swap_instruction(
+        &self, 
+        instruction: &crate::client::Instruction, 
+        account_keys: &[String], 
+        program_id: &str
+    ) -> Option<SwapInstructionData> {
+        match program_id {
+            program_ids::RAYDIUM_AMM => self.parse_raydium_amm_swap(instruction, account_keys),
+            program_ids::RAYDIUM_CLMM => self.parse_raydium_clmm_swap(instruction, account_keys),
+            program_ids::ORCA_WHIRLPOOLS => self.parse_orca_whirlpool_swap(instruction, account_keys),
+            program_ids::ORCA_V1 => self.parse_orca_v1_swap(instruction, account_keys),
+            program_ids::JUPITER => self.parse_jupiter_swap(instruction, account_keys),
+            program_ids::PUMP_FUN => self.parse_pump_fun_swap(instruction, account_keys),
+            _ => {
+                debug!("未知的DEX程序: {}", program_id);
+                None
+            }
+        }
+    }
+    
+    /// 解析Raydium AMM swap指令
+    fn parse_raydium_amm_swap(
+        &self, 
+        instruction: &crate::client::Instruction, 
+        account_keys: &[String]
+    ) -> Option<SwapInstructionData> {
+        if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
+            // Raydium AMM swap指令标识符通常是 [9] (swap指令)
+            if data.len() >= 17 && data[0] == 9 {
+                let amount_in = u64::from_le_bytes(data[1..9].try_into().ok()?);
+                let amount_out = u64::from_le_bytes(data[9..17].try_into().ok()?);
+                
+                // 解析账户信息
+                let user_address = account_keys.get(*instruction.accounts.get(16)? as usize)?.clone();
+                let pool_address = account_keys.get(*instruction.accounts.get(1)? as usize)?.clone();
+                
+                // 推断token地址
+                let token_in = self.infer_token_from_accounts(&instruction.accounts, account_keys, true)?;
+                let token_out = self.infer_token_from_accounts(&instruction.accounts, account_keys, false)?;
+                
+                debug!("Raydium AMM swap: {} -> {}, amount_in: {}, amount_out: {}",
+                       get_token_symbol(&token_in), get_token_symbol(&token_out), amount_in, amount_out);
+                
+                return Some(SwapInstructionData {
+                    dex_type: DexType::Raydium,
+                    token_in,
+                    token_out,
+                    amount_in,
+                    amount_out,
+                    user_address,
+                    pool_address,
+                });
+            }
+        }
+        None
+    }
+    
+    /// 解析Raydium CLMM swap指令
+    fn parse_raydium_clmm_swap(
+        &self, 
+        instruction: &crate::client::Instruction, 
+        account_keys: &[String]
+    ) -> Option<SwapInstructionData> {
+        if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
+            // CLMM swap指令可能有不同的标识符
+            if data.len() >= 17 {
+                // 尝试解析金额（位置可能不同）
+                let amount_in = if data.len() >= 9 {
+                    u64::from_le_bytes(data[1..9].try_into().ok()?)
+                } else { 0 };
+                
+                let amount_out = if data.len() >= 17 {
+                    u64::from_le_bytes(data[9..17].try_into().ok()?)
+                } else { 0 };
+                
+                let user_address = account_keys.get(*instruction.accounts.get(0)? as usize)?.clone();
+                let pool_address = account_keys.get(*instruction.accounts.get(1)? as usize)?.clone();
+                
+                let token_in = self.infer_token_from_accounts(&instruction.accounts, account_keys, true)?;
+                let token_out = self.infer_token_from_accounts(&instruction.accounts, account_keys, false)?;
+                
+                debug!("Raydium CLMM swap: {} -> {}, amount_in: {}, amount_out: {}",
+                       get_token_symbol(&token_in), get_token_symbol(&token_out), amount_in, amount_out);
+                
+                return Some(SwapInstructionData {
+                    dex_type: DexType::Raydium,
+                    token_in,
+                    token_out,
+                    amount_in,
+                    amount_out,
+                    user_address,
+                    pool_address,
+                });
+            }
+        }
+        None
+    }
+    
+    /// 解析Orca Whirlpool swap指令
+    fn parse_orca_whirlpool_swap(
+        &self, 
+        instruction: &crate::client::Instruction, 
+        account_keys: &[String]
+    ) -> Option<SwapInstructionData> {
+        if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
+            // Orca whirlpool swap 指令标识
+            if data.len() >= 25 && data[0..8] == [0xf8, 0xc6, 0x9e, 0x91, 0xe1, 0x75, 0x87, 0xc8] {
+                let amount_in = u64::from_le_bytes(data[8..16].try_into().ok()?);
+                let amount_out = u64::from_le_bytes(data[16..24].try_into().ok()?);
+                
+                let user_address = account_keys.get(*instruction.accounts.get(0)? as usize)?.clone();
+                let pool_address = account_keys.get(*instruction.accounts.get(1)? as usize)?.clone();
+                
+                let token_in = self.infer_token_from_accounts(&instruction.accounts, account_keys, true)?;
+                let token_out = self.infer_token_from_accounts(&instruction.accounts, account_keys, false)?;
+                
+                debug!("Orca Whirlpool swap: {} -> {}, amount_in: {}, amount_out: {}",
+                       get_token_symbol(&token_in), get_token_symbol(&token_out), amount_in, amount_out);
+                
+                return Some(SwapInstructionData {
+                    dex_type: DexType::Orca,
+                    token_in,
+                    token_out,
+                    amount_in,
+                    amount_out,
+                    user_address,
+                    pool_address,
+                });
+            }
+        }
+        None
+    }
+    
+    /// 解析Orca V1 swap指令
+    fn parse_orca_v1_swap(
+        &self, 
+        instruction: &crate::client::Instruction, 
+        account_keys: &[String]
+    ) -> Option<SwapInstructionData> {
+        if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
+            // Orca V1 swap指令
+            if data.len() >= 17 && data[0] == 1 {
+                let amount_in = u64::from_le_bytes(data[1..9].try_into().ok()?);
+                let amount_out = u64::from_le_bytes(data[9..17].try_into().ok()?);
+                
+                let user_address = account_keys.get(*instruction.accounts.get(0)? as usize)?.clone();
+                let pool_address = account_keys.get(*instruction.accounts.get(1)? as usize)?.clone();
+                
+                let token_in = self.infer_token_from_accounts(&instruction.accounts, account_keys, true)?;
+                let token_out = self.infer_token_from_accounts(&instruction.accounts, account_keys, false)?;
+                
+                debug!("Orca V1 swap: {} -> {}, amount_in: {}, amount_out: {}",
+                       get_token_symbol(&token_in), get_token_symbol(&token_out), amount_in, amount_out);
+                
+                return Some(SwapInstructionData {
+                    dex_type: DexType::Orca,
+                    token_in,
+                    token_out,
+                    amount_in,
+                    amount_out,
+                    user_address,
+                    pool_address,
+                });
+            }
+        }
+        None
+    }
+    
+    /// 解析Jupiter swap指令
+    fn parse_jupiter_swap(
+        &self, 
+        instruction: &crate::client::Instruction, 
+        account_keys: &[String]
+    ) -> Option<SwapInstructionData> {
+        if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
+            // Jupiter是聚合器，指令格式可能更复杂
+            if data.len() >= 17 {
+                // 尝试解析基本的swap信息
+                let amount_in = if data.len() >= 9 {
+                    u64::from_le_bytes(data[1..9].try_into().ok()?)
+                } else { 0 };
+                
+                let user_address = account_keys.get(*instruction.accounts.get(0)? as usize)?.clone();
+                let pool_address = account_keys.get(*instruction.accounts.get(1).unwrap_or(&0) as usize)?.clone();
+                
+                let token_in = self.infer_token_from_accounts(&instruction.accounts, account_keys, true)?;
+                let token_out = self.infer_token_from_accounts(&instruction.accounts, account_keys, false)?;
+                
+                debug!("Jupiter swap: {} -> {}, amount_in: {}",
+                       get_token_symbol(&token_in), get_token_symbol(&token_out), amount_in);
+                
+                return Some(SwapInstructionData {
+                    dex_type: DexType::Jupiter,
+                    token_in,
+                    token_out,
+                    amount_in,
+                    amount_out: 0, // Jupiter可能不直接提供预期输出
+                    user_address,
+                    pool_address,
+                });
+            }
+        }
+        None
+    }
+    
+    /// 解析Pump.fun swap指令
+    fn parse_pump_fun_swap(
+        &self, 
+        instruction: &crate::client::Instruction, 
+        account_keys: &[String]
+    ) -> Option<SwapInstructionData> {
+        if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
+            // Pump.fun的指令格式
+            if data.len() >= 17 {
+                let amount_in = u64::from_le_bytes(data[1..9].try_into().ok()?);
+                let amount_out = u64::from_le_bytes(data[9..17].try_into().ok()?);
+                
+                let user_address = account_keys.get(*instruction.accounts.get(0)? as usize)?.clone();
+                let pool_address = account_keys.get(*instruction.accounts.get(1)? as usize)?.clone();
+                
+                let token_in = self.infer_token_from_accounts(&instruction.accounts, account_keys, true)?;
+                let token_out = self.infer_token_from_accounts(&instruction.accounts, account_keys, false)?;
+                
+                debug!("Pump.fun swap: {} -> {}, amount_in: {}, amount_out: {}",
+                       get_token_symbol(&token_in), get_token_symbol(&token_out), amount_in, amount_out);
+                
+                return Some(SwapInstructionData {
+                    dex_type: DexType::PumpFun,
+                    token_in,
+                    token_out,
+                    amount_in,
+                    amount_out,
+                    user_address,
+                    pool_address,
+                });
+            }
+        }
+        None
+    }
+    
+    /// 从账户列表推断token地址
+    fn infer_token_from_accounts(
+        &self, 
+        accounts: &[u8], 
+        account_keys: &[String], 
+        is_input: bool
+    ) -> Option<String> {
+        // 根据账户位置推断token
+        // 通常input token在前面的位置，output token在后面
+        let start_idx = if is_input { 2 } else { 4 };
+        let end_idx = if is_input { 6 } else { 8 };
+        
+        for i in start_idx..end_idx.min(accounts.len()) {
+            if let Some(account) = account_keys.get(accounts[i] as usize) {
+                // 检查是否是已知的token地址
+                if self.is_known_token(account) {
+                    return Some(account.clone());
+                }
+            }
+        }
+        
+        // 如果没找到已知token，返回第一个可能的token账户
+        if let Some(account_idx) = accounts.get(start_idx) {
+            account_keys.get(*account_idx as usize).cloned()
+        } else {
+            None
+        }
+    }
+    
+    /// 检查是否是已知的token
+    fn is_known_token(&self, address: &str) -> bool {
+        matches!(address, 
+            WSOL | USDC | USDT | RAY | BONK | WIF |
+            "11111111111111111111111111111111" | // System program
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" // Token program
+        )
+    }
+    
+    /// 基于指令解析数据计算更精确的损失
+    pub async fn calculate_instruction_based_loss(
+        &self,
+        client: &crate::client::SolanaClient,
+        front_tx_sig: &str,
+        target_tx_sig: &str,
+        back_tx_sig: &str,
+    ) -> Option<UserLoss> {
+        debug!("开始基于指令解析的损失计算");
+        
+        // 获取三个交易
+        let front_tx = client.get_transaction(front_tx_sig).await.ok()?;
+        let target_tx = client.get_transaction(target_tx_sig).await.ok()?;
+        let back_tx = client.get_transaction(back_tx_sig).await.ok()?;
+        
+        // 解析每个交易的指令数据
+        let front_data = self.parse_transaction_instructions(&front_tx);
+        let target_data = self.parse_transaction_instructions(&target_tx);
+        let back_data = self.parse_transaction_instructions(&back_tx);
+        
+        debug!("指令解析完成 - 前置:{}个swap, 目标:{}个swap, 后置:{}个swap",
+               front_data.swap_instructions.len(),
+               target_data.swap_instructions.len(), 
+               back_data.swap_instructions.len());
+        
+        // 分析攻击者的套利行为
+        let attacker_profit = self.calculate_attacker_arbitrage_profit(&front_data, &back_data);
+        let user_trade_value = target_data.total_sol_amount;
+        
+        // 基于套利利润估算用户损失
+        let estimated_loss = if attacker_profit > 0 {
+            // 用户损失通常是攻击者利润的80-95%
+            (attacker_profit as f64 * 0.85) as u64
+        } else {
+            // 如果无法计算攻击者利润，使用滑点估算
+            (user_trade_value as f64 * 0.005) as u64
+        };
+        
+        let loss_percentage = if user_trade_value > 0 {
+            (estimated_loss as f64 / user_trade_value as f64) * 100.0
+        } else {
+            0.0
+        };
+        
+        // 创建token损失详情
+        let token_losses = self.create_instruction_based_token_losses(&target_data, estimated_loss);
+        
+        // 计算置信度
+        let confidence_score = self.calculate_instruction_based_confidence(&front_data, &target_data, &back_data);
+        
+        // 验证结果
+        let validation_passed = estimated_loss > 1000 && 
+                               loss_percentage <= 20.0 && 
+                               user_trade_value > 0;
+        
+        let primary_loss_token = self.identify_primary_loss_token(&token_losses);
+        
+        if validation_passed && estimated_loss > 1000 {
+            Some(UserLoss {
+                estimated_loss_lamports: estimated_loss,
+                loss_percentage: loss_percentage.min(15.0),
+                calculation_method: "指令解析分析法".to_string(),
+                mev_profit_lamports: attacker_profit,
+                mev_profit_token: Some("SOL".to_string()), // 指令解析暂时只支持SOL利润
+                mev_profit_amount: attacker_profit as f64 / 1_000_000_000.0,
+                confidence_score,
+                validation_passed,
+                token_losses,
+                primary_loss_token,
+            })
+        } else {
+            None
+        }
+    }
+    
+    /// 计算攻击者套利利润
+    fn calculate_attacker_arbitrage_profit(
+        &self, 
+        front_data: &TransactionInstructionData, 
+        back_data: &TransactionInstructionData
+    ) -> u64 {
+        // 简化计算：前置交易投入 - 后置交易获得
+        let front_investment = front_data.total_sol_amount;
+        let back_gains = back_data.total_sol_amount;
+        
+        if back_gains > front_investment {
+            back_gains - front_investment
+        } else {
+            0
+        }
+    }
+    
+    /// 创建基于指令解析的token损失
+    fn create_instruction_based_token_losses(
+        &self, 
+        target_data: &TransactionInstructionData, 
+        estimated_sol_loss: u64
+    ) -> Vec<TokenLossDetail> {
+        let mut losses = Vec::new();
+        
+        // 添加SOL损失
+        if estimated_sol_loss > 0 {
+            losses.push(TokenLossDetail {
+                token_address: WSOL.to_string(),
+                token_symbol: "SOL".to_string(),
+                loss_amount: estimated_sol_loss,
+                loss_amount_ui: estimated_sol_loss as f64 / 1_000_000_000.0,
+            });
+        }
+        
+        // 基于swap指令添加其他token损失
+        for swap in &target_data.swap_instructions {
+            // 跳过SOL/WSOL，避免重复计算
+            if swap.token_out == WSOL {
+                continue;
+            }
+            
+            let token_symbol = get_token_symbol(&swap.token_out);
+            
+            // 使用更保守的损失率，特别是对于大额交易
+            let amount_out_ui = swap.amount_out as f64 / 1_000_000.0; // 假设6位小数
+            let loss_rate = if amount_out_ui > 100000.0 { // 大额交易
+                0.003 // 0.3%
+            } else if token_symbol == "USDC" || token_symbol == "USDT" {
+                0.02 // 2%
+            } else {
+                0.008 // 0.8%
+            };
+            
+            let token_loss_ui = amount_out_ui * loss_rate;
+            let token_loss = (swap.amount_out as f64 * loss_rate) as u64;
+            
+            // 只记录大于1单位的损失
+            if token_loss_ui > 1.0 {
+                losses.push(TokenLossDetail {
+                    token_address: swap.token_out.clone(),
+                    token_symbol: if token_symbol == "UNKNOWN" {
+                        format!("Token_{}", &swap.token_out[0..8.min(swap.token_out.len())])
+                    } else {
+                        token_symbol.to_string()
+                    },
+                    loss_amount: token_loss,
+                    loss_amount_ui: token_loss_ui,
+                });
+            }
+        }
+        
+        losses
+    }
+    
+    /// 计算基于指令解析的置信度
+    fn calculate_instruction_based_confidence(
+        &self,
+        front_data: &TransactionInstructionData,
+        _target_data: &TransactionInstructionData,
+        back_data: &TransactionInstructionData,
+    ) -> f64 {
+        let mut confidence: f64 = 0.6; // 基础置信度
+        
+        // 有前置和后置交易的swap指令
+        if !front_data.swap_instructions.is_empty() && !back_data.swap_instructions.is_empty() {
+            confidence += 0.25;
+        }
+        
+        // Token匹配度
+        let common_tokens: HashSet<_> = front_data.involved_tokens.iter()
+            .filter(|token| back_data.involved_tokens.contains(token))
+            .collect();
+        
+        if !common_tokens.is_empty() {
+            confidence += 0.15;
+        }
+        
+        confidence.min(0.9) // 最高90%置信度（指令解析可能有误差）
+    }
 }
